@@ -26,11 +26,21 @@ let hemisphereLight = null;
 // Lighting control state
 let lightingControlsEnabled = true;
 
+// Loading UI elements
+let loadingOverlay = null;
+let loadingBar = null;
+let loadingText = null;
+
 function init() {
   // Initialize input handling
   input.init();
 
   console.log('Voronoi Skies Initialized');
+
+  // Get loading UI elements
+  loadingOverlay = document.getElementById('loading-overlay');
+  loadingBar = document.getElementById('loading-bar');
+  loadingText = document.getElementById('loading-text');
 
   // Initialize renderer
   const container = document.getElementById('game-container');
@@ -46,20 +56,21 @@ function init() {
   // Set up Three.js lighting for GPU-accelerated terrain shading
   setupLighting(scene);
 
-  // Initialize chunk manager for infinite terrain
+  // Initialize chunk manager for infinite terrain with progress callback
   chunkManager = new ChunkManager({
     worldSeed: 42,
     chunkSize: 2000,
     loadRadius: 5,         // 11x11 grid = 121 chunks for high altitude view
     gridSpacing: 25,       // ~6400 cells per chunk
     boundaryMode: 'none',  // No visible cell edges (cleanest look)
-    terrainGroup: terrainRenderer.getTerrainGroup()
+    terrainGroup: terrainRenderer.getTerrainGroup(),
+    onLoadProgress: updateLoadingProgress
   });
 
   // Create player aircraft at origin
   player = new Aircraft(0, 0);
 
-  // Generate initial chunks synchronously (centered on player start)
+  // Queue initial chunks for async loading (closest to player first)
   chunkManager.initializeAtPosition(player.x, player.y);
 
   // Add shadow mesh to scene (after terrain, before aircraft)
@@ -77,6 +88,32 @@ function init() {
   // Start game loop
   lastTime = performance.now();
   requestAnimationFrame(gameLoop);
+}
+
+/**
+ * Update loading progress bar
+ * @param {number} loaded - Number of chunks loaded
+ * @param {number} total - Total chunks to load
+ */
+function updateLoadingProgress(loaded, total) {
+  if (loadingBar) {
+    const percent = total > 0 ? (loaded / total) * 100 : 0;
+    loadingBar.style.width = `${percent}%`;
+  }
+  if (loadingText) {
+    loadingText.textContent = `Generating terrain... ${loaded}/${total}`;
+  }
+
+  // Hide overlay when loading is complete
+  if (loaded >= total && loadingOverlay) {
+    loadingOverlay.classList.add('hidden');
+    // Remove from DOM after transition
+    setTimeout(() => {
+      if (loadingOverlay && loadingOverlay.parentNode) {
+        loadingOverlay.parentNode.removeChild(loadingOverlay);
+      }
+    }, 500);
+  }
 }
 
 /**

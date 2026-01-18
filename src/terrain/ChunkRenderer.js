@@ -17,7 +17,10 @@ export class ChunkRenderer {
     this.cellMaterial = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      flatShading: true  // Use face normals for flat-shaded look
+      flatShading: true,  // Use face normals for flat-shaded look
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1
     });
 
     this.edgeMaterial = new THREE.LineBasicMaterial({
@@ -246,10 +249,53 @@ export class ChunkRenderer {
     const material = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      flatShading: false  // Smooth shading with interpolated vertex normals
+      flatShading: false,  // Smooth shading with interpolated vertex normals
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1
     });
 
     return new THREE.Mesh(geometry, material);
+  }
+
+  /**
+   * Build chunk meshes from pre-computed typed arrays (from worker)
+   * @param {Chunk} chunk - Target chunk to populate
+   * @param {Float32Array} positions - Vertex positions (3 floats per vertex)
+   * @param {Float32Array} normals - Vertex normals (3 floats per vertex)
+   * @param {Float32Array} colors - Vertex colors (3 floats per vertex, RGB with AO baked in)
+   * @param {number[]} bounds - [minX, minY, maxX, maxY] chunk bounds
+   */
+  buildFromBuffers(chunk, positions, normals, colors, bounds) {
+    const geometry = new THREE.BufferGeometry();
+
+    // Set attributes directly from typed arrays
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    // Use Lambert material for proper GPU lighting with smooth shading
+    const material = new THREE.MeshLambertMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      flatShading: false, // Smooth shading with interpolated vertex normals
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.z = -10; // Behind aircraft
+
+    chunk.cellMesh = mesh;
+    chunk.group.add(mesh);
+
+    // Build water plane at sea level
+    const waterMesh = this.buildWaterMesh(bounds);
+    chunk.waterMesh = waterMesh;
+    chunk.group.add(waterMesh);
+
+    chunk.isGenerated = true;
   }
 
   /**

@@ -9,7 +9,7 @@ import { LightingConfig, getLightDirection, computeHillshadeFromGradient, AOConf
 
 // Elevation scaling factor: maps noise [-1, 1] to world units (feet)
 // Higher values create steeper slopes for more dramatic hillshade
-const ELEVATION_SCALE = 400;
+const ELEVATION_SCALE = 2000;
 
 export class ChunkGenerator {
   /**
