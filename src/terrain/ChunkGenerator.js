@@ -2,9 +2,13 @@
  * Generates Voronoi terrain cells for a single chunk
  */
 import { Delaunay } from 'd3-delaunay';
-import { generateSeededPoints, createSeededRandom } from '../utils/seededRandom.js';
-import { initNoise, sampleBiome, sampleElevation } from './noise.js';
-import { getBiomeFromNoise, getCellColor } from './biomes.js';
+import { generateJitteredGridPoints } from '../utils/seededRandom.js';
+import { initNoise, continental, moisture, detail, computeElevation } from './noise.js';
+import { biome, getCellColor } from './biomes.js';
+import { LightingConfig, getLightDirection, computeHillshadeFromGradient } from './lighting.js';
+
+// Elevation scaling factor: maps noise [-1, 1] to world units (feet)
+const ELEVATION_SCALE = 50;
 
 export class ChunkGenerator {
   /**
@@ -20,63 +24,196 @@ export class ChunkGenerator {
    */
   initializeNoise() {
     if (!this.noiseInitialized) {
-      initNoise(this.worldSeed, this.worldSeed + 1000);
+      initNoise(this.worldSeed);
       this.noiseInitialized = true;
     }
   }
 
   /**
    * Generate Voronoi cells for a chunk
+   * Uses jittered grid for seamless chunk boundaries.
+   * Two-pass approach: first compute terrain data, then determine biomes with neighbor access.
+   *
    * @param {Chunk} chunk - The chunk to generate cells for
-   * @param {number} chunkSeed - Deterministic seed for this chunk
-   * @param {number} cellCount - Number of cells to generate
+   * @param {number} chunkSeed - Unused (kept for API compatibility), uses worldSeed internally
+   * @param {Object} config - Generation configuration
+   * @param {number} config.gridSpacing - Distance between grid cell centers (default 115)
    * @returns {Array} - Array of cell objects
    */
-  generateChunk(chunk, chunkSeed, cellCount = 75) {
+  generateChunk(chunk, chunkSeed, config = {}) {
+    const {
+      gridSpacing = 25  // ~6400 cells per 2000x2000 chunk
+    } = config;
+
     // Ensure noise is initialized
     this.initializeNoise();
 
     const bounds = chunk.bounds;
+    const [minX, minY, maxX, maxY] = bounds;
 
-    // Generate seed points within chunk bounds
-    const points = generateSeededPoints(cellCount, chunkSeed, bounds);
+    // Margin ensures cells near edges have proper neighbors from adjacent chunks
+    // 2x spacing guarantees all relevant neighbor points are included
+    const margin = gridSpacing * 2;
 
-    // Create Voronoi diagram for this chunk
+    // Generate points using global jittered grid (deterministic based on world coordinates)
+    const points = generateJitteredGridPoints(this.worldSeed, bounds, gridSpacing, margin);
+
+    // Extended bounds for Voronoi computation (includes margin area)
+    const extendedBounds = [
+      minX - margin,
+      minY - margin,
+      maxX + margin,
+      maxY + margin
+    ];
+
+    // Create Voronoi diagram over extended area
     const delaunay = Delaunay.from(points);
-    const voronoi = delaunay.voronoi(bounds);
+    const voronoi = delaunay.voronoi(extendedBounds);
 
-    // Build cell data with biome/color
-    const random = createSeededRandom(chunkSeed + 2000);
-
-    const cells = points.map((point, index) => {
+    // === PASS 1: Compute terrain data, filter to cells inside chunk bounds ===
+    const cellData = [];
+    for (let index = 0; index < points.length; index++) {
       const polygon = voronoi.cellPolygon(index);
-      if (!polygon) return null;
+      if (!polygon) continue;
 
       // Compute centroid (different from seed point)
       const centroid = this.computeCentroid(polygon);
 
-      // Sample noise at centroid using world coordinates
-      const biomeNoise = sampleBiome(centroid[0], centroid[1]);
-      const elevation = sampleElevation(centroid[0], centroid[1]);
+      // Filter: only keep cells whose centroid falls within actual chunk bounds
+      // This ensures each cell is rendered by exactly one chunk
+      if (centroid[0] < minX || centroid[0] >= maxX ||
+          centroid[1] < minY || centroid[1] >= maxY) {
+        continue;
+      }
 
-      // Determine biome and color
-      const biome = getBiomeFromNoise(biomeNoise);
-      const variation = random(); // Per-cell random for shade variation
-      const color = getCellColor(biome, elevation, variation);
+      // Sample noise layers at centroid using world coordinates
+      const cont = continental(centroid[0], centroid[1]);
+      const moist = moisture(centroid[0], centroid[1]);
+      const det = detail(centroid[0], centroid[1]);
 
-      return {
+      // Compute final elevation with ocean remapping
+      // Ocean: continental < 0 remapped to negative elevations [-1, -0.1]
+      // Land: elevation noise scaled by continental excess above threshold
+      const finalElevation = computeElevation(centroid[0], centroid[1]);
+
+      cellData.push({
         index,
-        seedPoint: point,
+        seedPoint: points[index],
         centroid,
         polygon,
-        biome,
-        elevation,
-        color
-      };
-    }).filter(c => c !== null);
+        continental: cont,
+        elevation: finalElevation,  // Use computed elevation for biome determination
+        moisture: moist,
+        detail: det,
+        biome: null,
+        color: null,
+        hillshade: 0
+      });
+    }
 
-    chunk.cells = cells;
-    return cells;
+    // Build index map for quick lookup (maps original point index to cell data)
+    const cellMap = new Map(cellData.map(c => [c.index, c]));
+
+    // === PASS 2: Determine biomes and hillshade with neighbor access ===
+    for (const cell of cellData) {
+      // Get neighbor indices from Delaunay triangulation
+      const neighborIndices = this.getNeighborIndices(delaunay, cell.index, points.length);
+
+      // Collect neighbor elevations (may include cells outside chunk that aren't rendered)
+      const neighborElevations = [];
+      for (const ni of neighborIndices) {
+        // Try to get from our cell map first
+        const neighborCell = cellMap.get(ni);
+        if (neighborCell) {
+          neighborElevations.push(neighborCell.elevation);
+        } else {
+          // Neighbor is outside chunk - compute elevation at its seed point
+          const neighborPoint = points[ni];
+          if (neighborPoint) {
+            const neighborFinalElev = computeElevation(neighborPoint[0], neighborPoint[1]);
+            neighborElevations.push(neighborFinalElev);
+          }
+        }
+      }
+
+      const neighbors = { elevations: neighborElevations };
+
+      // Determine biome with neighbor context (uses combined continental+elevation)
+      cell.biome = biome(cell.elevation, cell.moisture, neighbors);
+
+      // Compute hillshade from elevation gradient at cell centroid
+      cell.hillshade = this.computeHillshade(cell);
+
+      // Calculate color with hillshade
+      const variation = (cell.detail + 1) / 2;
+      cell.color = getCellColor(cell.biome, cell.elevation, variation, cell.hillshade);
+    }
+
+    chunk.cells = cellData;
+
+    // Build Delaunay triangle data with 3D elevation
+    chunk.triangles = this.buildTriangles(delaunay, points, bounds);
+
+    return cellData;
+  }
+
+  /**
+   * Compute hillshade value based on elevation gradient at cell centroid
+   * Uses finite differences with a small epsilon to compute true gradient
+   * @param {Object} cell - The cell to compute hillshade for
+   * @returns {number} - Hillshade value in [0, 1], 1 = fully lit, 0 = in shadow
+   */
+  computeHillshade(cell) {
+    // Get light direction from configurable settings
+    const lightDir = getLightDirection(LightingConfig.azimuth, LightingConfig.elevation);
+
+    const cx = cell.centroid[0];
+    const cy = cell.centroid[1];
+
+    // Use a small epsilon for finite differences
+    // This should be small relative to noise frequency but large enough for numerical stability
+    // Elevation frequency is 0.00333 (wavelength ~300 units), so epsilon of 10 units is ~3% of a wavelength
+    const epsilon = 10;
+
+    // Sample computed elevation at centroid and offset positions
+    const elevCenter = computeElevation(cx, cy);
+    const elevPosX = computeElevation(cx + epsilon, cy);
+    const elevNegX = computeElevation(cx - epsilon, cy);
+    const elevPosY = computeElevation(cx, cy + epsilon);
+    const elevNegY = computeElevation(cx, cy - epsilon);
+
+    // Central difference gradient: dE/dx and dE/dy
+    const gradX = (elevPosX - elevNegX) / (2 * epsilon);
+    const gradY = (elevPosY - elevNegY) / (2 * epsilon);
+
+    // Scale gradient for visual effect
+    // Noise returns values in [-1, 1], so gradient magnitude is typically small
+    // We need to amplify significantly for visible hillshading
+    const gradientScale = 500;
+
+    // Compute hillshade using the lighting module
+    return computeHillshadeFromGradient(gradX * gradientScale, gradY * gradientScale, lightDir);
+  }
+
+  /**
+   * Get neighbor cell indices using Delaunay triangulation
+   * @param {Delaunay} delaunay - Delaunay triangulation
+   * @param {number} cellIndex - Index of cell to find neighbors for
+   * @param {number} totalCells - Total number of cells (for bounds checking)
+   * @returns {number[]} - Array of neighbor cell indices
+   */
+  getNeighborIndices(delaunay, cellIndex, totalCells) {
+    const neighbors = [];
+
+    // d3-delaunay provides neighbors via delaunay.neighbors(i)
+    // This returns an iterable of indices
+    for (const neighborIndex of delaunay.neighbors(cellIndex)) {
+      if (neighborIndex >= 0 && neighborIndex < totalCells) {
+        neighbors.push(neighborIndex);
+      }
+    }
+
+    return neighbors;
   }
 
   /**
@@ -92,5 +229,113 @@ export class ChunkGenerator {
       cy += polygon[i][1];
     }
     return [cx / n, cy / n];
+  }
+
+  /**
+   * Build Delaunay triangle data for the chunk
+   * @param {Delaunay} delaunay - Delaunay triangulation
+   * @param {Array} points - Array of [x, y] seed points
+   * @param {number[]} bounds - [minX, minY, maxX, maxY] chunk bounds
+   * @returns {Array} - Array of triangle data objects
+   */
+  buildTriangles(delaunay, points, bounds) {
+    const triangleIndices = delaunay.triangles;
+    const numTriangles = triangleIndices.length / 3;
+    const triangles = [];
+    const [minX, minY, maxX, maxY] = bounds;
+
+    // Pre-compute elevation for all points (used for 3D vertex positions)
+    const pointElevations = points.map(([x, y]) => computeElevation(x, y));
+
+    // Get light direction for hillshade computation
+    const lightDir = getLightDirection(LightingConfig.azimuth, LightingConfig.elevation);
+
+    for (let t = 0; t < numTriangles; t++) {
+      const i0 = triangleIndices[t * 3 + 0];
+      const i1 = triangleIndices[t * 3 + 1];
+      const i2 = triangleIndices[t * 3 + 2];
+
+      // Get vertex positions with 3D elevation
+      const v0 = { x: points[i0][0], y: points[i0][1], z: pointElevations[i0] * ELEVATION_SCALE };
+      const v1 = { x: points[i1][0], y: points[i1][1], z: pointElevations[i1] * ELEVATION_SCALE };
+      const v2 = { x: points[i2][0], y: points[i2][1], z: pointElevations[i2] * ELEVATION_SCALE };
+
+      // Compute centroid (including z for 3D terrain)
+      const centroid = {
+        x: (v0.x + v1.x + v2.x) / 3,
+        y: (v0.y + v1.y + v2.y) / 3,
+        z: (v0.z + v1.z + v2.z) / 3
+      };
+
+      // Average elevation for biome determination (raw, not scaled)
+      const avgElevation = (pointElevations[i0] + pointElevations[i1] + pointElevations[i2]) / 3;
+
+      // Filter: only keep triangles whose centroid is within chunk bounds
+      if (centroid.x < minX || centroid.x >= maxX ||
+          centroid.y < minY || centroid.y >= maxY) {
+        continue;
+      }
+
+      // Compute face normal from actual 3D geometry
+      const faceNormal = this.computeFaceNormal(v0, v1, v2);
+
+      // Sample moisture and detail at centroid for biome/color variation
+      const moist = moisture(centroid.x, centroid.y);
+      const det = detail(centroid.x, centroid.y);
+
+      // Determine biome from average elevation (no neighbor context for triangles)
+      const triangleBiome = biome(avgElevation, moist, null);
+
+      // Compute hillshade from face normal dot product with light direction
+      const hillshade = Math.max(0, faceNormal.x * lightDir.x +
+                                     faceNormal.y * lightDir.y +
+                                     faceNormal.z * lightDir.z);
+
+      // Get color with hillshade applied
+      const variation = (det + 1) / 2;
+      const color = getCellColor(triangleBiome, avgElevation, variation, hillshade);
+
+      triangles.push({
+        indices: [i0, i1, i2],
+        vertices: [v0, v1, v2],
+        centroid,
+        faceNormal,
+        averageElevation: avgElevation,
+        biome: triangleBiome,
+        color,
+        hillshade
+      });
+    }
+
+    return triangles;
+  }
+
+  /**
+   * Compute face normal from three vertices using cross product
+   * @param {{x: number, y: number, z: number}} v0 - First vertex
+   * @param {{x: number, y: number, z: number}} v1 - Second vertex
+   * @param {{x: number, y: number, z: number}} v2 - Third vertex
+   * @returns {{x: number, y: number, z: number}} - Normalized face normal
+   */
+  computeFaceNormal(v0, v1, v2) {
+    // edge1 = v1 - v0
+    const e1x = v1.x - v0.x;
+    const e1y = v1.y - v0.y;
+    const e1z = v1.z - v0.z;
+
+    // edge2 = v2 - v0
+    const e2x = v2.x - v0.x;
+    const e2y = v2.y - v0.y;
+    const e2z = v2.z - v0.z;
+
+    // cross product
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+
+    // normalize
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (len === 0) return { x: 0, y: 0, z: 1 };
+    return { x: nx / len, y: ny / len, z: nz / len };
   }
 }

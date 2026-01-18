@@ -16,6 +16,9 @@ let lastTime = 0;
 let debugElement = null;
 let currentTerrainZ = 0;
 
+// Lighting control state
+let lightingControlsEnabled = true;
+
 function init() {
   // Initialize input handling
   input.init();
@@ -37,8 +40,9 @@ function init() {
   chunkManager = new ChunkManager({
     worldSeed: 42,
     chunkSize: 2000,
-    loadRadius: 5,  // 11x11 grid = 121 chunks for high altitude view
-    cellsPerChunk: 75,
+    loadRadius: 5,         // 11x11 grid = 121 chunks for high altitude view
+    gridSpacing: 25,       // ~6400 cells per chunk
+    boundaryMode: 'none',  // No visible cell edges (cleanest look)
     terrainGroup: terrainRenderer.getTerrainGroup()
   });
 
@@ -57,9 +61,58 @@ function init() {
   // Get debug element for FPS display
   debugElement = document.getElementById('debug');
 
+  // Set up lighting keyboard controls
+  initLightingControls();
+
   // Start game loop
   lastTime = performance.now();
   requestAnimationFrame(gameLoop);
+}
+
+/**
+ * Initialize keyboard controls for lighting adjustments
+ * L/Shift+L: Rotate light azimuth ±15°
+ * K/Shift+K: Adjust elevation ±5°
+ * I/Shift+I: Adjust intensity ±0.05
+ * U/Shift+U: Adjust ambient ±0.05
+ */
+function initLightingControls() {
+  window.addEventListener('keydown', (e) => {
+    if (!lightingControlsEnabled || !chunkManager) return;
+
+    const config = chunkManager.getLightingConfig();
+    let updated = false;
+
+    switch (e.code) {
+      case 'KeyL':
+        // Rotate azimuth: L = +15° (clockwise), Shift+L = -15° (counter-clockwise)
+        config.azimuth = e.shiftKey ? config.azimuth - 15 : config.azimuth + 15;
+        updated = true;
+        break;
+
+      case 'KeyK':
+        // Adjust elevation: K = +5°, Shift+K = -5°
+        config.elevation = e.shiftKey ? config.elevation - 5 : config.elevation + 5;
+        updated = true;
+        break;
+
+      case 'KeyI':
+        // Adjust intensity: I = +0.05, Shift+I = -0.05
+        config.intensity = e.shiftKey ? config.intensity - 0.05 : config.intensity + 0.05;
+        updated = true;
+        break;
+
+      case 'KeyU':
+        // Adjust ambient: U = +0.05, Shift+U = -0.05
+        config.ambient = e.shiftKey ? config.ambient - 0.05 : config.ambient + 0.05;
+        updated = true;
+        break;
+    }
+
+    if (updated) {
+      chunkManager.setLightingConfig(config);
+    }
+  });
 }
 
 function gameLoop(currentTime) {
@@ -116,6 +169,7 @@ function updateDebug(deltaTime) {
     const fps = Math.round(1 / deltaTime);
     const chunkX = Math.floor(player.x / 2000);
     const chunkY = Math.floor(player.y / 2000);
+    const lighting = chunkManager.getLightingConfig();
     debugElement.innerHTML = [
       `FPS: ${fps}`,
       `X: ${Math.round(player.x)}`,
@@ -128,6 +182,9 @@ function updateDebug(deltaTime) {
       `CHUNK: ${chunkX},${chunkY}`,
       `ACTIVE: ${chunkManager.getActiveChunkCount()}`,
       `QUEUE: ${chunkManager.getQueuedChunkCount()}`,
+      `--- LIGHT (L/K/I/U) ---`,
+      `AZ: ${lighting.azimuth}° EL: ${lighting.elevation}°`,
+      `INT: ${lighting.intensity.toFixed(2)} AMB: ${lighting.ambient.toFixed(2)}`,
     ].join('<br>');
   }
 }

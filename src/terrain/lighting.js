@@ -1,0 +1,143 @@
+/**
+ * Terrain lighting configuration and hillshade calculations
+ * Provides configurable directional lighting for the Voronoi terrain system
+ */
+
+/**
+ * Global lighting configuration
+ * All angles in degrees, colors normalized [0, 1]
+ */
+export const LightingConfig = {
+  azimuth: 315,       // Light direction: 0=N, 90=E, 180=S, 270=W (315=NW)
+  elevation: 45,      // Angle above horizon in degrees (0=horizon, 90=overhead)
+  intensity: 0.3,     // Hillshade strength multiplier (0=flat, 1=full contrast)
+  ambient: 0.2,       // Minimum brightness floor (0=black shadows, 1=no shadows)
+  color: { r: 1.0, g: 1.0, b: 1.0 }  // Light color (neutral white default)
+};
+
+/**
+ * Convert azimuth and elevation to a 3D light direction vector
+ * @param {number} azimuth - Compass direction of light source in degrees (0=N, clockwise)
+ * @param {number} elevation - Angle above horizon in degrees (0-90)
+ * @returns {{x: number, y: number, z: number}} - Normalized light direction vector
+ */
+export function getLightDirection(azimuth, elevation) {
+  // Convert to radians
+  const azRad = azimuth * Math.PI / 180;
+  const elRad = elevation * Math.PI / 180;
+
+  // Project onto horizontal plane
+  const cosEl = Math.cos(elRad);
+
+  // In our coordinate system:
+  // X increases east, Y increases north (in terrain space)
+  // Azimuth 0 = north = +Y, Azimuth 90 = east = +X
+  return {
+    x: Math.sin(azRad) * cosEl,
+    y: Math.cos(azRad) * cosEl,
+    z: Math.sin(elRad)
+  };
+}
+
+/**
+ * Compute hillshade value from surface gradient and light direction
+ * @param {number} gradX - Elevation gradient in X direction (dE/dx)
+ * @param {number} gradY - Elevation gradient in Y direction (dE/dy)
+ * @param {{x: number, y: number, z: number}} lightDir - Light direction vector
+ * @returns {number} - Hillshade factor in [0, 1], 1 = fully lit, 0 = in shadow
+ */
+export function computeHillshadeFromGradient(gradX, gradY, lightDir) {
+  // Construct surface normal from gradient
+  // N = normalize(-dE/dx, -dE/dy, 1)
+  const nx = -gradX;
+  const ny = -gradY;
+  const nz = 1;
+  const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+  // Normalized surface normal
+  const normalX = nx / nLen;
+  const normalY = ny / nLen;
+  const normalZ = nz / nLen;
+
+  // Dot product with light direction
+  const dotProduct = normalX * lightDir.x + normalY * lightDir.y + normalZ * lightDir.z;
+
+  // Clamp to [0, 1] - negative values mean surface faces away from light
+  return Math.max(0, Math.min(1, dotProduct));
+}
+
+/**
+ * Apply hillshade lighting to a base color
+ * Formula: luminance = ambient + (1 - ambient) * H * intensity
+ * @param {number} baseColor - RGB hex color (0xRRGGBB)
+ * @param {number} hillshade - Raw hillshade value [0, 1]
+ * @param {Object} config - Lighting configuration
+ * @returns {number} - Modified RGB hex color
+ */
+export function applyHillshadeToColor(baseColor, hillshade, config = LightingConfig) {
+  const { intensity, ambient, color } = config;
+
+  // Extract RGB components
+  const r = ((baseColor >> 16) & 0xFF);
+  const g = ((baseColor >> 8) & 0xFF);
+  const b = (baseColor & 0xFF);
+
+  // Compute luminance factor
+  // ambient = minimum brightness, intensity controls how much hillshade affects brightness
+  const luminance = ambient + (1 - ambient) * hillshade * intensity;
+
+  // Apply light color tinting (stronger tint on brighter areas)
+  const tintStrength = hillshade * intensity * 0.5; // Subtle tinting
+
+  // Blend base color with light color based on luminance
+  let finalR = r * luminance;
+  let finalG = g * luminance;
+  let finalB = b * luminance;
+
+  // Add light color contribution for highlights
+  if (hillshade > 0.5) {
+    const highlightFactor = (hillshade - 0.5) * 2 * tintStrength;
+    finalR = finalR + (255 * color.r - finalR) * highlightFactor * 0.1;
+    finalG = finalG + (255 * color.g - finalG) * highlightFactor * 0.1;
+    finalB = finalB + (255 * color.b - finalB) * highlightFactor * 0.1;
+  }
+
+  // Clamp and return
+  return (Math.min(255, Math.max(0, Math.round(finalR))) << 16) |
+         (Math.min(255, Math.max(0, Math.round(finalG))) << 8) |
+         Math.min(255, Math.max(0, Math.round(finalB)));
+}
+
+/**
+ * Update lighting configuration
+ * @param {Object} updates - Partial config updates
+ */
+export function updateLightingConfig(updates) {
+  if (updates.azimuth !== undefined) {
+    // Wrap azimuth to [0, 360)
+    LightingConfig.azimuth = ((updates.azimuth % 360) + 360) % 360;
+  }
+  if (updates.elevation !== undefined) {
+    // Clamp elevation to [0, 90]
+    LightingConfig.elevation = Math.max(0, Math.min(90, updates.elevation));
+  }
+  if (updates.intensity !== undefined) {
+    // Clamp intensity to [0, 1]
+    LightingConfig.intensity = Math.max(0, Math.min(1, updates.intensity));
+  }
+  if (updates.ambient !== undefined) {
+    // Clamp ambient to [0, 1]
+    LightingConfig.ambient = Math.max(0, Math.min(1, updates.ambient));
+  }
+  if (updates.color !== undefined) {
+    LightingConfig.color = { ...LightingConfig.color, ...updates.color };
+  }
+}
+
+/**
+ * Get a copy of the current lighting configuration
+ * @returns {Object} - Current lighting config
+ */
+export function getLightingConfig() {
+  return { ...LightingConfig, color: { ...LightingConfig.color } };
+}

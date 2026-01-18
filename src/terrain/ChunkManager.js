@@ -3,8 +3,9 @@
  */
 import { Chunk } from './Chunk.js';
 import { ChunkGenerator } from './ChunkGenerator.js';
-import { ChunkRenderer } from './ChunkRenderer.js';
+import { ChunkRenderer, BoundaryMode } from './ChunkRenderer.js';
 import { hashChunkSeed } from '../utils/hash.js';
+import { updateLightingConfig, getLightingConfig } from './lighting.js';
 
 export class ChunkManager {
   /**
@@ -12,14 +13,16 @@ export class ChunkManager {
    * @param {number} config.worldSeed - Seed for deterministic generation
    * @param {number} config.chunkSize - Size of each chunk in world units (default: 2000)
    * @param {number} config.loadRadius - Chunks to load in each direction (default: 2)
-   * @param {number} config.cellsPerChunk - Voronoi cells per chunk (default: 75)
+   * @param {number} config.gridSpacing - Grid spacing for jittered point placement (default: 115)
+   * @param {string} config.boundaryMode - Boundary rendering mode: 'none', 'darker', 'biome' (default: 'none')
    * @param {THREE.Group} config.terrainGroup - Parent group for chunk meshes
    */
   constructor(config) {
     this.worldSeed = config.worldSeed || 42;
     this.chunkSize = config.chunkSize || 2000;
     this.loadRadius = config.loadRadius || 2;
-    this.cellsPerChunk = config.cellsPerChunk || 75;
+    this.gridSpacing = config.gridSpacing || 25; // ~6400 cells per 2000x2000 chunk
+    this.boundaryMode = config.boundaryMode || BoundaryMode.NONE;
     this.terrainGroup = config.terrainGroup;
 
     // Active chunks: Map<string, Chunk>
@@ -163,14 +166,16 @@ export class ChunkManager {
     // Create chunk
     const chunk = new Chunk(chunkX, chunkY, this.chunkSize);
 
-    // Get deterministic seed for this chunk
+    // Get deterministic seed for this chunk (kept for API compatibility)
     const chunkSeed = hashChunkSeed(this.worldSeed, chunkX, chunkY);
 
-    // Generate cells
-    this.chunkGenerator.generateChunk(chunk, chunkSeed, this.cellsPerChunk);
+    // Generate cells with jittered grid configuration
+    this.chunkGenerator.generateChunk(chunk, chunkSeed, {
+      gridSpacing: this.gridSpacing
+    });
 
-    // Build meshes
-    this.chunkRenderer.buildChunkMeshes(chunk);
+    // Build meshes with boundary mode
+    this.chunkRenderer.buildChunkMeshes(chunk, this.boundaryMode);
 
     // Add to scene
     this.terrainGroup.add(chunk.group);
@@ -259,5 +264,45 @@ export class ChunkManager {
    */
   getQueuedChunkCount() {
     return this.generationQueue.length;
+  }
+
+  /**
+   * Update lighting configuration and regenerate all chunks
+   * @param {Object} updates - Partial lighting config updates
+   */
+  setLightingConfig(updates) {
+    updateLightingConfig(updates);
+    this.regenerateAllChunks();
+  }
+
+  /**
+   * Get current lighting configuration
+   * @returns {Object} - Current lighting config
+   */
+  getLightingConfig() {
+    return getLightingConfig();
+  }
+
+  /**
+   * Regenerate all loaded chunks (e.g., after lighting change)
+   * Preserves chunk positions but recalculates colors
+   */
+  regenerateAllChunks() {
+    // Get all chunk coordinates before clearing
+    const chunkCoords = [];
+    for (const [key] of this.chunks) {
+      const [cx, cy] = key.split(',').map(Number);
+      chunkCoords.push({ chunkX: cx, chunkY: cy });
+    }
+
+    // Unload all current chunks
+    for (const [key] of this.chunks) {
+      this.unloadChunk(key);
+    }
+
+    // Reload all chunks with new lighting
+    for (const { chunkX, chunkY } of chunkCoords) {
+      this.loadChunk(chunkX, chunkY);
+    }
   }
 }

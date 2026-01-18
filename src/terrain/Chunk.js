@@ -28,6 +28,9 @@ export class Chunk {
     // Cell data (for potential future queries)
     this.cells = [];
 
+    // Delaunay triangle data
+    this.triangles = [];
+
     // Mesh references for disposal
     this.cellMesh = null;
     this.edgeMesh = null;
@@ -66,6 +69,7 @@ export class Chunk {
     }
 
     this.cells = [];
+    this.triangles = [];
     this.isGenerated = false;
   }
 }
