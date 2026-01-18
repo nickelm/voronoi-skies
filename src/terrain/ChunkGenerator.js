@@ -3,9 +3,9 @@
  */
 import { Delaunay } from 'd3-delaunay';
 import { generateJitteredGridPoints } from '../utils/seededRandom.js';
-import { initNoise, continental, moisture, detail, computeElevation } from './noise.js';
-import { biome, getCellColor, getBaseColor } from './biomes.js';
-import { LightingConfig, getLightDirection, computeHillshadeFromGradient } from './lighting.js';
+import { initNoise, classifyZone, Zone, isWaterZone, moisture, detail, computeElevation, getElevation } from './noise.js';
+import { biome, biomeFromZone, getCellColor, getBaseColor } from './biomes.js';
+import { LightingConfig, getLightDirection, computeHillshadeFromGradient, AOConfig } from './lighting.js';
 
 // Elevation scaling factor: maps noise [-1, 1] to world units (feet)
 // Higher values create steeper slopes for more dramatic hillshade
@@ -88,22 +88,22 @@ export class ChunkGenerator {
       }
 
       // Sample noise layers at centroid using world coordinates
-      const cont = continental(centroid[0], centroid[1]);
-      const moist = moisture(centroid[0], centroid[1]);
+      const { zone, continentalValue } = classifyZone(centroid[0], centroid[1]);
+      // Skip detailed moisture sampling for water zones (use 0.5 default)
+      const moist = isWaterZone(zone) ? 0.5 : moisture(centroid[0], centroid[1]);
       const det = detail(centroid[0], centroid[1]);
 
-      // Compute final elevation with ocean remapping
-      // Ocean: continental < 0 remapped to negative elevations [-1, -0.1]
-      // Land: elevation noise scaled by continental excess above threshold
-      const finalElevation = computeElevation(centroid[0], centroid[1]);
+      // Compute final elevation with zone-based approach
+      const { elevation: finalElevation } = computeElevation(centroid[0], centroid[1]);
 
       cellData.push({
         index,
         seedPoint: points[index],
         centroid,
         polygon,
-        continental: cont,
-        elevation: finalElevation,  // Use computed elevation for biome determination
+        zone,
+        continental: continentalValue,
+        elevation: finalElevation,
         moisture: moist,
         detail: det,
         biome: null,
@@ -131,7 +131,7 @@ export class ChunkGenerator {
           // Neighbor is outside chunk - compute elevation at its seed point
           const neighborPoint = points[ni];
           if (neighborPoint) {
-            const neighborFinalElev = computeElevation(neighborPoint[0], neighborPoint[1]);
+            const neighborFinalElev = getElevation(neighborPoint[0], neighborPoint[1]);
             neighborElevations.push(neighborFinalElev);
           }
         }
@@ -139,8 +139,8 @@ export class ChunkGenerator {
 
       const neighbors = { elevations: neighborElevations };
 
-      // Determine biome with neighbor context (uses combined continental+elevation)
-      cell.biome = biome(cell.elevation, cell.moisture, neighbors);
+      // Determine biome with zone-aware function
+      cell.biome = biomeFromZone(cell.zone, cell.elevation, cell.moisture);
 
       // Compute hillshade from elevation gradient at cell centroid
       cell.hillshade = this.computeHillshade(cell);
@@ -173,15 +173,15 @@ export class ChunkGenerator {
 
     // Use a small epsilon for finite differences
     // This should be small relative to noise frequency but large enough for numerical stability
-    // Elevation frequency is 0.00333 (wavelength ~300 units), so epsilon of 10 units is ~3% of a wavelength
+    // Regional frequency is 0.0008 (wavelength ~1250 units), so epsilon of 10 units is reasonable
     const epsilon = 10;
 
     // Sample computed elevation at centroid and offset positions
-    const elevCenter = computeElevation(cx, cy);
-    const elevPosX = computeElevation(cx + epsilon, cy);
-    const elevNegX = computeElevation(cx - epsilon, cy);
-    const elevPosY = computeElevation(cx, cy + epsilon);
-    const elevNegY = computeElevation(cx, cy - epsilon);
+    const elevCenter = getElevation(cx, cy);
+    const elevPosX = getElevation(cx + epsilon, cy);
+    const elevNegX = getElevation(cx - epsilon, cy);
+    const elevPosY = getElevation(cx, cy + epsilon);
+    const elevNegY = getElevation(cx, cy - epsilon);
 
     // Central difference gradient: dE/dx and dE/dy
     const gradX = (elevPosX - elevNegX) / (2 * epsilon);
@@ -194,6 +194,50 @@ export class ChunkGenerator {
 
     // Compute hillshade using the lighting module
     return computeHillshadeFromGradient(gradX * gradientScale, gradY * gradientScale, lightDir);
+  }
+
+  /**
+   * Compute ambient occlusion factor for a vertex based on surrounding elevation
+   * Samples 8 surrounding points and determines how "enclosed" the vertex is
+   * @param {number} x - World X coordinate
+   * @param {number} y - World Y coordinate
+   * @param {number} elevation - Vertex elevation (raw noise value, not scaled)
+   * @returns {number} - AO factor in [0, 1], 1 = fully lit, 0 = fully occluded
+   */
+  computeVertexAO(x, y, elevation) {
+    if (!AOConfig.enabled) return 1.0;
+
+    const { samplingRadius, maxHeight, strength } = AOConfig;
+
+    // 8 directions: N, NE, E, SE, S, SW, W, NW
+    const directions = [
+      [0, 1], [0.707, 0.707], [1, 0], [0.707, -0.707],
+      [0, -1], [-0.707, -0.707], [-1, 0], [-0.707, 0.707]
+    ];
+
+    let totalOcclusion = 0;
+
+    for (const [dx, dy] of directions) {
+      const sampleX = x + dx * samplingRadius;
+      const sampleY = y + dy * samplingRadius;
+      const sampleElev = getElevation(sampleX, sampleY);
+
+      // Height difference (positive = neighbor is higher = occluding)
+      const heightDiff = sampleElev - elevation;
+
+      // Smoothstep for gradual occlusion transition
+      if (heightDiff > 0) {
+        const t = Math.min(1, heightDiff / maxHeight);
+        // Smoothstep: 3t^2 - 2t^3
+        totalOcclusion += t * t * (3 - 2 * t);
+      }
+    }
+
+    // Average occlusion across all samples
+    const avgOcclusion = totalOcclusion / directions.length;
+
+    // AO factor: 1 = no occlusion, lower = more shadow
+    return 1.0 - (avgOcclusion * strength);
   }
 
   /**
@@ -246,7 +290,12 @@ export class ChunkGenerator {
     const [minX, minY, maxX, maxY] = bounds;
 
     // Pre-compute elevation for all points (used for 3D vertex positions)
-    const pointElevations = points.map(([x, y]) => computeElevation(x, y));
+    const pointElevations = points.map(([x, y]) => getElevation(x, y));
+
+    // Pre-compute AO for all points (valleys darker, ridges brighter)
+    const pointAO = points.map(([x, y], i) =>
+      this.computeVertexAO(x, y, pointElevations[i])
+    );
 
     for (let t = 0; t < numTriangles; t++) {
       const i0 = triangleIndices[t * 3 + 0];
@@ -295,7 +344,8 @@ export class ChunkGenerator {
         faceNormal,
         averageElevation: avgElevation,
         biome: triangleBiome,
-        baseColor  // Used by GPU lighting
+        baseColor,  // Used by GPU lighting
+        vertexAO: [pointAO[i0], pointAO[i1], pointAO[i2]]  // Per-vertex ambient occlusion
       });
     }
 

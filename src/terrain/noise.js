@@ -1,30 +1,61 @@
 /**
  * Seeded noise functions for terrain generation
  * Implements fractal Brownian motion (fBm) with domain warping
+ *
+ * Layer Hierarchy (Chunk A):
+ * - Continental (0.00025): Zone classification (deep ocean / ocean / coastal / inland)
+ * - Regional (0.0008): Broad elevation shapes (land only)
+ * - Local (0.003): Hills/valleys, amplitude 0.15, subordinate to regional
+ * - Detail (0.02): Color variation only, not geometry
+ * - Moisture (0.002): Biome variation on land
  */
 import { createNoise2D } from 'simplex-noise';
 import { createSeededRandom } from '../utils/seededRandom.js';
 
+// Zone classification enum
+export const Zone = {
+  DEEP_OCEAN: 0,
+  OCEAN: 1,
+  COASTAL: 2,
+  INLAND: 3
+};
+
+// Zone thresholds based on continental noise value
+export const ZONE_THRESHOLDS = {
+  deepOcean: -0.5,   // Below this: deep ocean
+  ocean: -0.15,      // -0.5 to -0.15: regular ocean
+  coastal: 0.1       // -0.15 to 0.1: coastal, >= 0.1: inland
+};
+
 // Layer configuration for different noise types
 const NOISE_LAYERS = {
   continental: {
-    baseFrequency: 0.0005,  // wavelength ~2000 units
-    octaves: 2,             // reduced from 4 for broader land masses
-    lacunarity: 2.0,        // frequency multiplier per octave
-    persistence: 0.5,       // amplitude multiplier per octave
-    warpStrength: 150,      // domain warp displacement
-    warpFrequency: 0.0003   // frequency of warp noise
-  },
-  elevation: {
-    baseFrequency: 0.00333, // wavelength ~300 units (was 0.005, λ ~200)
-    octaves: 5,
+    baseFrequency: 0.00025,  // wavelength ~4000 units (was 0.0005)
+    octaves: 2,
     lacunarity: 2.0,
     persistence: 0.5,
-    warpStrength: 50,
-    warpFrequency: 0.002
+    warpStrength: 200,       // increased from 150 for more organic coastlines
+    warpFrequency: 0.00015   // lowered to match new frequency scale
+  },
+  regional: {
+    baseFrequency: 0.0008,   // wavelength ~1250 units (NEW)
+    octaves: 3,
+    lacunarity: 2.0,
+    persistence: 0.5,
+    warpStrength: 80,
+    warpFrequency: 0.0005
+  },
+  local: {
+    baseFrequency: 0.003,    // wavelength ~333 units
+    octaves: 4,
+    lacunarity: 2.0,
+    persistence: 0.5,
+    warpStrength: 30,
+    warpFrequency: 0.002,
+    amplitude: 0.15          // subordinate to regional
   },
   moisture: {
-    baseFrequency: 0.002,   // wavelength ~500 units
+    baseFrequency: 0.002,    // wavelength ~500 units (unchanged)
     octaves: 3,
     lacunarity: 2.0,
     persistence: 0.6,
@@ -32,11 +63,11 @@ const NOISE_LAYERS = {
     warpFrequency: 0.001
   },
   detail: {
-    baseFrequency: 0.0333,  // wavelength ~30 units (was 0.02, λ ~50)
+    baseFrequency: 0.02,     // wavelength ~50 units (was 0.0333)
     octaves: 2,
     lacunarity: 2.0,
     persistence: 0.5,
-    warpStrength: 0,        // no warp for detail
+    warpStrength: 0,
     warpFrequency: 0
   }
 };
@@ -44,7 +75,8 @@ const NOISE_LAYERS = {
 // Noise generators (initialized by initNoise)
 let noiseGenerators = {
   continental: null,
-  elevation: null,
+  regional: null,
+  local: null,
   moisture: null,
   detail: null,
   warpX: null,
@@ -115,11 +147,12 @@ export function initNoise(worldSeed) {
   // Derive unique seeds for each layer (stable offsets)
   const seeds = {
     continental: worldSeed,
-    elevation: worldSeed + 1000,
-    moisture: worldSeed + 2000,
-    detail: worldSeed + 3000,
-    warpX: worldSeed + 4000,
-    warpY: worldSeed + 5000
+    regional: worldSeed + 1000,
+    local: worldSeed + 2000,
+    moisture: worldSeed + 3000,
+    detail: worldSeed + 4000,
+    warpX: worldSeed + 5000,
+    warpY: worldSeed + 6000
   };
 
   // Create noise generators
@@ -131,10 +164,10 @@ export function initNoise(worldSeed) {
 }
 
 /**
- * Sample continental noise (land vs ocean)
+ * Sample continental noise (zone determination)
  * @param {number} x - World X coordinate
  * @param {number} y - World Y coordinate
- * @returns {number} - Value in [-1, 1], negative = ocean, positive = land
+ * @returns {number} - Value in [-1, 1]
  */
 export function continental(x, y) {
   const config = NOISE_LAYERS.continental;
@@ -143,15 +176,27 @@ export function continental(x, y) {
 }
 
 /**
- * Sample elevation at world coordinates
+ * Sample regional noise - broad elevation shapes (land only)
  * @param {number} x - World X coordinate
  * @param {number} y - World Y coordinate
  * @returns {number} - Value in [-1, 1]
  */
-export function elevation(x, y) {
-  const config = NOISE_LAYERS.elevation;
+export function regional(x, y) {
+  const config = NOISE_LAYERS.regional;
   const [wx, wy] = warpCoordinates(x, y, config);
-  return sampleFBm(noiseGenerators.elevation, wx, wy, config);
+  return sampleFBm(noiseGenerators.regional, wx, wy, config);
+}
+
+/**
+ * Sample local noise - hills and valleys (subordinate to regional)
+ * @param {number} x - World X coordinate
+ * @param {number} y - World Y coordinate
+ * @returns {number} - Value in [-1, 1]
+ */
+export function local(x, y) {
+  const config = NOISE_LAYERS.local;
+  const [wx, wy] = warpCoordinates(x, y, config);
+  return sampleFBm(noiseGenerators.local, wx, wy, config);
 }
 
 /**
@@ -169,7 +214,7 @@ export function moisture(x, y) {
 }
 
 /**
- * Sample detail noise for local variation
+ * Sample detail noise for local color variation (not geometry)
  * @param {number} x - World X coordinate
  * @param {number} y - World Y coordinate
  * @returns {number} - Value in [-1, 1]
@@ -193,35 +238,143 @@ function remap(value, inMin, inMax, outMin, outMax) {
 }
 
 /**
- * Compute final elevation using continental threshold for ocean mapping
- * Uses continental noise to determine land vs ocean, then applies appropriate elevation.
- * Ocean areas: continental value remapped to negative elevations [-1, -0.1]
- * Land areas: elevation noise scaled by distance from continental threshold
+ * Classify a point into terrain zones based on continental noise
+ * @param {number} x - World X coordinate
+ * @param {number} y - World Y coordinate
+ * @returns {{zone: number, continentalValue: number}} - Zone enum and raw continental value
+ */
+export function classifyZone(x, y) {
+  const cont = continental(x, y);
+
+  let zone;
+  if (cont < ZONE_THRESHOLDS.deepOcean) {
+    zone = Zone.DEEP_OCEAN;
+  } else if (cont < ZONE_THRESHOLDS.ocean) {
+    zone = Zone.OCEAN;
+  } else if (cont < ZONE_THRESHOLDS.coastal) {
+    zone = Zone.COASTAL;
+  } else {
+    zone = Zone.INLAND;
+  }
+
+  return { zone, continentalValue: cont };
+}
+
+/**
+ * Check if a zone is water (deep ocean or ocean)
+ * @param {number} zone - Zone enum value
+ * @returns {boolean}
+ */
+export function isWaterZone(zone) {
+  return zone === Zone.DEEP_OCEAN || zone === Zone.OCEAN;
+}
+
+/**
+ * Check if a zone is land (coastal or inland)
+ * @param {number} zone - Zone enum value
+ * @returns {boolean}
+ */
+export function isLandZone(zone) {
+  return zone === Zone.COASTAL || zone === Zone.INLAND;
+}
+
+/**
+ * Compute final elevation using zone-based approach
+ * - Deep Ocean: deep negative elevation based on continental value
+ * - Ocean: moderate negative elevation
+ * - Coastal: low positive elevation, regional noise muted
+ * - Inland: full regional + local combination
  *
  * @param {number} x - World X coordinate
  * @param {number} y - World Y coordinate
- * @param {number} threshold - Continental threshold (default 0), values below are ocean
- * @returns {number} - Final elevation in [-1, 1], negative = underwater
+ * @returns {{elevation: number, zone: number}} - Final elevation [-1, 1] and zone
  */
-export function computeElevation(x, y, threshold = 0) {
-  const cont = continental(x, y);
-  const baseElev = elevation(x, y);
+export function computeElevation(x, y) {
+  const { zone, continentalValue } = classifyZone(x, y);
 
-  if (cont < threshold) {
-    // Ocean: remap continental to negative elevations
-    // Map continental range [-1, threshold] to elevation range [-1, -0.1]
-    return remap(cont, -1, threshold, -1, -0.1);
-  } else {
-    // Land: full elevation range scaled by continental excess
-    // The further above threshold, the more elevation variation allowed
-    const landFactor = (cont - threshold) / (1 - threshold);
-    return baseElev * landFactor;
+  let elevation;
+
+  switch (zone) {
+    case Zone.DEEP_OCEAN:
+      // Deep ocean: remap continental [-1, -0.5] to elevation [-1, -0.6]
+      elevation = remap(continentalValue, -1, ZONE_THRESHOLDS.deepOcean, -1, -0.6);
+      break;
+
+    case Zone.OCEAN:
+      // Ocean: remap continental [-0.5, -0.15] to elevation [-0.6, -0.15]
+      elevation = remap(
+        continentalValue,
+        ZONE_THRESHOLDS.deepOcean,
+        ZONE_THRESHOLDS.ocean,
+        -0.6,
+        -0.15
+      );
+      break;
+
+    case Zone.COASTAL: {
+      // Coastal: low elevation with muted regional, light local influence
+      // Remap continental [-0.15, 0.1] to base [0, 0.15]
+      const coastalBase = remap(
+        continentalValue,
+        ZONE_THRESHOLDS.ocean,
+        ZONE_THRESHOLDS.coastal,
+        0,
+        0.15
+      );
+      const coastalRegional = regional(x, y) * 0.3;  // muted regional
+      const coastalLocal = local(x, y) * NOISE_LAYERS.local.amplitude * 0.5;  // half local
+      elevation = coastalBase + coastalRegional * 0.1 + coastalLocal;
+      elevation = Math.max(0, Math.min(0.3, elevation));  // clamp coastal range
+      break;
+    }
+
+    case Zone.INLAND:
+    default: {
+      // Inland: full regional + local combination
+      // Base from how far inland we are
+      const inlandness = (continentalValue - ZONE_THRESHOLDS.coastal) /
+                         (1 - ZONE_THRESHOLDS.coastal);
+      const baseElevation = 0.1 + inlandness * 0.2;  // [0.1, 0.3] base
+
+      // Regional provides main shape [0, 0.5] additional
+      const regionalContrib = (regional(x, y) + 1) / 2 * 0.5 * (0.5 + inlandness * 0.5);
+
+      // Local adds hills/valleys with low amplitude
+      const localContrib = local(x, y) * NOISE_LAYERS.local.amplitude;
+
+      elevation = baseElevation + regionalContrib + localContrib;
+      elevation = Math.max(0.05, Math.min(1, elevation));  // clamp to valid land range
+      break;
+    }
   }
+
+  return { elevation, zone };
+}
+
+/**
+ * Get elevation only (convenience wrapper)
+ * @param {number} x - World X coordinate
+ * @param {number} y - World Y coordinate
+ * @returns {number} - Final elevation [-1, 1]
+ */
+export function getElevation(x, y) {
+  return computeElevation(x, y).elevation;
 }
 
 // ============================================
 // DEPRECATED: Backward compatibility aliases
 // ============================================
+
+/**
+ * @deprecated Use regional() instead
+ * Sample elevation noise at world coordinates
+ * @param {number} x - World X coordinate
+ * @param {number} y - World Y coordinate
+ * @returns {number} - Value in [-1, 1]
+ */
+export function elevation(x, y) {
+  return regional(x, y);
+}
 
 /**
  * @deprecated Use continental() instead
@@ -235,13 +388,13 @@ export function sampleBiome(x, y) {
 }
 
 /**
- * @deprecated Use elevation() instead
+ * @deprecated Use regional() instead
  * Sample elevation noise at world coordinates
- * Note: Returns [0, 1] for backward compatibility (new elevation() returns [-1, 1])
+ * Note: Returns [0, 1] for backward compatibility (new regional() returns [-1, 1])
  * @param {number} x - World X coordinate
  * @param {number} y - World Y coordinate
  * @returns {number} - Elevation value in [0, 1]
  */
 export function sampleElevation(x, y) {
-  return (elevation(x, y) + 1) / 2;
+  return (regional(x, y) + 1) / 2;
 }

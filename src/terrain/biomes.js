@@ -1,9 +1,10 @@
 /**
  * Biome definitions and color palettes for terrain
- * Uses continental, elevation, and moisture noise for biome determination
+ * Uses zone classification, elevation, and moisture noise for biome determination
  */
 
 import { LightingConfig, applyHillshadeToColor } from './lighting.js';
+import { Zone } from './noise.js';
 
 export const Biome = {
   // Water biomes
@@ -162,6 +163,43 @@ export function biome(elevation, moisture, neighbors = null) {
 
   // Snow: > 0.8
   return Biome.SNOW;
+}
+
+/**
+ * Determine biome from zone and elevation
+ * Zone-aware approach: water zones ignore moisture, land zones use elevation/moisture lookup
+ * @param {number} zone - Zone enum from classifyZone()
+ * @param {number} elevation - Elevation value from computeElevation()
+ * @param {number} moisture - Moisture value [0, 1] (only used for land zones)
+ * @returns {number} - Biome enum value
+ */
+export function biomeFromZone(zone, elevation, moisture) {
+  // Water zones: use zone directly for biome
+  if (zone === Zone.DEEP_OCEAN) {
+    return Biome.DEEP_OCEAN;
+  }
+
+  if (zone === Zone.OCEAN) {
+    // Could subdivide further based on elevation if desired
+    return elevation < -0.4 ? Biome.DEEP_OCEAN : Biome.OCEAN;
+  }
+
+  // Coastal zone: beach, shallow water, or low land
+  if (zone === Zone.COASTAL) {
+    if (elevation < 0) {
+      return Biome.SHALLOW_WATER;
+    }
+    if (elevation < ELEV_BEACH) {
+      return Biome.BEACH;
+    }
+    // Low coastal land - use moisture for variety
+    if (moisture < MOISTURE_LOW) return Biome.PLAINS;
+    if (moisture < MOISTURE_MID) return Biome.GRASSLAND;
+    return Biome.GRASSLAND;
+  }
+
+  // Inland zone: full elevation/moisture lookup
+  return biome(elevation, moisture, null);
 }
 
 /**

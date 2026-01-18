@@ -220,13 +220,16 @@ export class ChunkRenderer {
 
     for (const tri of triangles) {
       // Use baseColor (without hillshade baked in) for proper GPU lighting
-      const color = new THREE.Color(tri.baseColor !== undefined ? tri.baseColor : tri.color);
+      const baseColor = new THREE.Color(tri.baseColor !== undefined ? tri.baseColor : tri.color);
 
       // Add three vertices per triangle with per-vertex normals for smooth shading
       for (let i = 0; i < 3; i++) {
         const v = tri.vertices[i];
         // Use per-vertex normals if available, fall back to face normal
         const vn = tri.vertexNormals ? tri.vertexNormals[i] : tri.faceNormal;
+        // Apply per-vertex ambient occlusion (valleys darker, ridges brighter)
+        const ao = tri.vertexAO ? tri.vertexAO[i] : 1.0;
+        const color = baseColor.clone().multiplyScalar(ao);
 
         positions.push(v.x, v.y, v.z);
         normals.push(vn.x, vn.y, vn.z);

@@ -12,7 +12,22 @@ export const LightingConfig = {
   elevation: 45,      // Angle above horizon in degrees (0=horizon, 90=overhead)
   intensity: 1.0,     // Hillshade strength multiplier (0=flat, 1=full contrast)
   ambient: 0.4,       // Minimum brightness floor (0=black shadows, 1=no shadows)
-  color: { r: 1.0, g: 0.98, b: 0.95 }  // Light color (warm white default)
+  color: { r: 1.0, g: 0.98, b: 0.95 },  // Light color (warm white default)
+  hemisphere: {
+    skyColor: { r: 0.53, g: 0.81, b: 0.92 },    // Soft blue-white (0x87CEEB)
+    groundColor: { r: 0.24, g: 0.19, b: 0.16 }, // Dark warm gray (0x3d3028)
+    intensity: 0.35
+  }
+};
+
+/**
+ * Ambient occlusion configuration for vertex shading
+ */
+export const AOConfig = {
+  enabled: true,
+  samplingRadius: 40,  // World units (~1.5x gridSpacing)
+  maxHeight: 0.3,      // Elevation difference for full occlusion (noise units)
+  strength: 0.4        // 0-1, higher = darker valleys
 };
 
 /**
@@ -25,7 +40,12 @@ export const TimePresets = {
     intensity: 0.9,
     ambient: 0.3,
     color: { r: 1.0, g: 0.6, b: 0.4 },   // Warm orange
-    sky: { r: 0.4, g: 0.25, b: 0.35 }    // Purple-pink dawn sky
+    sky: { r: 0.4, g: 0.25, b: 0.35 },   // Purple-pink dawn sky
+    hemisphere: {
+      skyColor: { r: 1.0, g: 0.69, b: 0.49 },    // Warm peach
+      groundColor: { r: 0.16, g: 0.12, b: 0.10 }, // Dark warm
+      intensity: 0.25
+    }
   },
   noon: {
     azimuth: 180,       // Sun from south
@@ -33,7 +53,12 @@ export const TimePresets = {
     intensity: 1.0,
     ambient: 0.5,
     color: { r: 1.0, g: 0.98, b: 0.95 }, // Bright warm white
-    sky: { r: 0.1, g: 0.23, b: 0.32 }    // Blue sky (original)
+    sky: { r: 0.1, g: 0.23, b: 0.32 },   // Blue sky (original)
+    hemisphere: {
+      skyColor: { r: 0.53, g: 0.81, b: 0.92 },    // Soft blue-white
+      groundColor: { r: 0.24, g: 0.19, b: 0.16 }, // Dark warm gray
+      intensity: 0.35
+    }
   },
   night: {
     azimuth: 270,       // Moon from west
@@ -41,7 +66,12 @@ export const TimePresets = {
     intensity: 0.25,
     ambient: 0.1,
     color: { r: 0.6, g: 0.7, b: 1.0 },   // Cool blue moonlight
-    sky: { r: 0.02, g: 0.03, b: 0.08 }   // Dark night sky
+    sky: { r: 0.02, g: 0.03, b: 0.08 },  // Dark night sky
+    hemisphere: {
+      skyColor: { r: 0.10, g: 0.10, b: 0.18 },    // Dark blue
+      groundColor: { r: 0.04, g: 0.04, b: 0.06 }, // Near black
+      intensity: 0.15
+    }
   }
 };
 
@@ -59,6 +89,15 @@ export function applyTimePreset(presetName) {
   LightingConfig.intensity = preset.intensity;
   LightingConfig.ambient = preset.ambient;
   LightingConfig.color = { ...preset.color };
+
+  // Copy hemisphere settings if present
+  if (preset.hemisphere) {
+    LightingConfig.hemisphere = {
+      skyColor: { ...preset.hemisphere.skyColor },
+      groundColor: { ...preset.hemisphere.groundColor },
+      intensity: preset.hemisphere.intensity
+    };
+  }
 
   return preset;
 }

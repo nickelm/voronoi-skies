@@ -21,6 +21,7 @@ let currentTerrainZ = 0;
 // Three.js lighting
 let directionalLight = null;
 let ambientLight = null;
+let hemisphereLight = null;
 
 // Lighting control state
 let lightingControlsEnabled = true;
@@ -96,6 +97,14 @@ function setupLighting(scene) {
   // Set initial light direction from config
   updateLightDirection();
   scene.add(directionalLight);
+
+  // Hemisphere light: sky/ground gradient ambient
+  hemisphereLight = new THREE.HemisphereLight(
+    0x87CEEB,  // Sky: soft blue-white
+    0x3d3028,  // Ground: dark warm gray
+    0.35       // Intensity (supplement, not replacement)
+  );
+  scene.add(hemisphereLight);
 }
 
 /**
@@ -223,6 +232,13 @@ function syncLightsToConfig(skyColor = null) {
       LightingConfig.color.g,
       LightingConfig.color.b
     );
+  }
+  // Update hemisphere light from config
+  if (hemisphereLight && LightingConfig.hemisphere) {
+    const hemi = LightingConfig.hemisphere;
+    hemisphereLight.color.setRGB(hemi.skyColor.r, hemi.skyColor.g, hemi.skyColor.b);
+    hemisphereLight.groundColor.setRGB(hemi.groundColor.r, hemi.groundColor.g, hemi.groundColor.b);
+    hemisphereLight.intensity = hemi.intensity;
   }
   // Update sky/background color
   if (skyColor) {
