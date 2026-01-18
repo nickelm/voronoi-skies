@@ -271,8 +271,8 @@ export class ChunkRenderer {
       opacity: 0.65,
       depthWrite: false,
       side: THREE.DoubleSide,
-      roughness: 0.3,
-      metalness: 0.1
+      roughness: 0.1,   // Lower roughness for sharper specular reflections
+      metalness: 0.3    // Higher metalness for sun reflection on water
     });
 
     const mesh = new THREE.Mesh(geometry, material);

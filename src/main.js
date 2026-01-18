@@ -105,6 +105,16 @@ function setupLighting(scene) {
     0.35       // Intensity (supplement, not replacement)
   );
   scene.add(hemisphereLight);
+
+  // Atmosphere haze: distance-based fog blending terrain toward sky color
+  // Terrain Z ranges from 100 (ground) to -15000 (max altitude)
+  // Camera at Z=600, so distances range from ~500 to ~15600
+  // Start fog early, extend far for subtle gradual blend (~30% at horizon)
+  scene.fog = new THREE.Fog(
+    new THREE.Color(0x87CEEB),  // Sky color (matches hemisphere sky)
+    1000,   // Near: fog starts gently at this distance
+    50000   // Far: very gradual falloff (subtle haze, not thick fog)
+  );
 }
 
 /**
@@ -240,11 +250,13 @@ function syncLightsToConfig(skyColor = null) {
     hemisphereLight.groundColor.setRGB(hemi.groundColor.r, hemi.groundColor.g, hemi.groundColor.b);
     hemisphereLight.intensity = hemi.intensity;
   }
-  // Update sky/background color
-  if (skyColor) {
-    const scene = renderer.getScene();
-    if (scene) {
-      scene.background.setRGB(skyColor.r, skyColor.g, skyColor.b);
+  // Update sky/background color and fog
+  const scene = renderer.getScene();
+  if (skyColor && scene) {
+    scene.background.setRGB(skyColor.r, skyColor.g, skyColor.b);
+    // Sync fog color with sky for consistent atmosphere
+    if (scene.fog) {
+      scene.fog.color.setRGB(skyColor.r, skyColor.g, skyColor.b);
     }
   }
   updateLightDirection();

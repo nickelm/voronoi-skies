@@ -44,8 +44,9 @@ export function init(container) {
   scene.background = new THREE.Color(0x1a3a52);
 
   // Set up perspective camera for altitude effect
+  // Far plane must accommodate terrain at max altitude (Z = -15000 from camera at Z = 600)
   const aspect = window.innerWidth / window.innerHeight;
-  camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, 1, 5000);
+  camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, 1, 20000);
   camera.position.z = CAMERA_Z;
 
   // Create WebGL renderer
