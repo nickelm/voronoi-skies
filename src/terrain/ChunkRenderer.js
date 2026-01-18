@@ -1,5 +1,6 @@
 /**
  * Builds Three.js meshes for a single terrain chunk
+ * Uses MeshLambertMaterial with vertex normals for GPU-accelerated lighting
  */
 import * as THREE from 'three';
 
@@ -12,10 +13,11 @@ export const BoundaryMode = {
 
 export class ChunkRenderer {
   constructor() {
-    // Shared materials for all chunks (memory optimization)
-    this.cellMaterial = new THREE.MeshBasicMaterial({
+    // Shared materials for all chunks - using Lambert for proper lighting
+    this.cellMaterial = new THREE.MeshLambertMaterial({
       vertexColors: true,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
+      flatShading: true  // Use face normals for flat-shaded look
     });
 
     this.edgeMaterial = new THREE.LineBasicMaterial({
@@ -45,6 +47,11 @@ export class ChunkRenderer {
         chunk.group.add(edgeMesh);
       }
 
+      // Build water plane at sea level
+      const waterMesh = this.buildWaterMesh(chunk.bounds);
+      chunk.waterMesh = waterMesh;
+      chunk.group.add(waterMesh);
+
       chunk.isGenerated = true;
       return;
     }
@@ -66,6 +73,11 @@ export class ChunkRenderer {
       chunk.edgeMesh = edgeMesh;
       chunk.group.add(edgeMesh);
     }
+
+    // Build water plane at sea level
+    const waterMesh = this.buildWaterMesh(chunk.bounds);
+    chunk.waterMesh = waterMesh;
+    chunk.group.add(waterMesh);
 
     chunk.isGenerated = true;
   }
@@ -196,34 +208,75 @@ export class ChunkRenderer {
   }
 
   /**
-   * Build mesh from Delaunay triangles with 3D elevation (flat shading)
+   * Build mesh from Delaunay triangles with 3D elevation and vertex normals
+   * Uses smooth Gouraud shading via per-vertex normals
    * @param {Array} triangles - Array of triangle data objects
    * @returns {THREE.Mesh}
    */
   buildTriangleMesh(triangles) {
     const positions = [];
+    const normals = [];
     const colors = [];
 
     for (const tri of triangles) {
-      const color = new THREE.Color(tri.color);
+      // Use baseColor (without hillshade baked in) for proper GPU lighting
+      const color = new THREE.Color(tri.baseColor !== undefined ? tri.baseColor : tri.color);
 
-      // Add three vertices per triangle (duplicated for flat shading)
-      for (const v of tri.vertices) {
+      // Add three vertices per triangle with per-vertex normals for smooth shading
+      for (let i = 0; i < 3; i++) {
+        const v = tri.vertices[i];
+        // Use per-vertex normals if available, fall back to face normal
+        const vn = tri.vertexNormals ? tri.vertexNormals[i] : tri.faceNormal;
+
         positions.push(v.x, v.y, v.z);
+        normals.push(vn.x, vn.y, vn.z);
         colors.push(color.r, color.g, color.b);
       }
     }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
-    const material = new THREE.MeshBasicMaterial({
+    // Use Lambert material with smooth shading (per-vertex normals)
+    const material = new THREE.MeshLambertMaterial({
       vertexColors: true,
-      side: THREE.DoubleSide
+      side: THREE.DoubleSide,
+      flatShading: false  // Smooth shading with interpolated vertex normals
     });
 
     return new THREE.Mesh(geometry, material);
+  }
+
+  /**
+   * Build a transparent water plane mesh for a chunk
+   * @param {number[]} bounds - [minX, minY, maxX, maxY] chunk bounds
+   * @returns {THREE.Mesh}
+   */
+  buildWaterMesh(bounds) {
+    const [minX, minY, maxX, maxY] = bounds;
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    // Single plane at sea level (z=0)
+    const geometry = new THREE.PlaneGeometry(width, height, 1, 1);
+
+    const material = new THREE.MeshStandardMaterial({
+      color: 0x1a5a7a,
+      transparent: true,
+      opacity: 0.65,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      roughness: 0.3,
+      metalness: 0.1
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    // Position at center of chunk, z=0 (sea level)
+    mesh.position.set((minX + maxX) / 2, (minY + maxY) / 2, 0);
+
+    return mesh;
   }
 
   /**

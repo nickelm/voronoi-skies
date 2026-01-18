@@ -4,11 +4,12 @@
 import { Delaunay } from 'd3-delaunay';
 import { generateJitteredGridPoints } from '../utils/seededRandom.js';
 import { initNoise, continental, moisture, detail, computeElevation } from './noise.js';
-import { biome, getCellColor } from './biomes.js';
+import { biome, getCellColor, getBaseColor } from './biomes.js';
 import { LightingConfig, getLightDirection, computeHillshadeFromGradient } from './lighting.js';
 
 // Elevation scaling factor: maps noise [-1, 1] to world units (feet)
-const ELEVATION_SCALE = 50;
+// Higher values create steeper slopes for more dramatic hillshade
+const ELEVATION_SCALE = 400;
 
 export class ChunkGenerator {
   /**
@@ -247,9 +248,6 @@ export class ChunkGenerator {
     // Pre-compute elevation for all points (used for 3D vertex positions)
     const pointElevations = points.map(([x, y]) => computeElevation(x, y));
 
-    // Get light direction for hillshade computation
-    const lightDir = getLightDirection(LightingConfig.azimuth, LightingConfig.elevation);
-
     for (let t = 0; t < numTriangles; t++) {
       const i0 = triangleIndices[t * 3 + 0];
       const i1 = triangleIndices[t * 3 + 1];
@@ -286,14 +284,9 @@ export class ChunkGenerator {
       // Determine biome from average elevation (no neighbor context for triangles)
       const triangleBiome = biome(avgElevation, moist, null);
 
-      // Compute hillshade from face normal dot product with light direction
-      const hillshade = Math.max(0, faceNormal.x * lightDir.x +
-                                     faceNormal.y * lightDir.y +
-                                     faceNormal.z * lightDir.z);
-
-      // Get color with hillshade applied
+      // Get base color without hillshade (GPU will handle lighting)
       const variation = (det + 1) / 2;
-      const color = getCellColor(triangleBiome, avgElevation, variation, hillshade);
+      const baseColor = getBaseColor(triangleBiome, avgElevation, variation);
 
       triangles.push({
         indices: [i0, i1, i2],
@@ -302,8 +295,42 @@ export class ChunkGenerator {
         faceNormal,
         averageElevation: avgElevation,
         biome: triangleBiome,
-        color,
-        hillshade
+        baseColor  // Used by GPU lighting
+      });
+    }
+
+    // Compute per-vertex normals by averaging face normals of adjacent triangles
+    // This enables smooth Gouraud shading
+    const vertexNormals = new Map();  // pointIndex -> {nx, ny, nz}
+
+    for (const tri of triangles) {
+      const fn = tri.faceNormal;
+      for (const idx of tri.indices) {
+        if (!vertexNormals.has(idx)) {
+          vertexNormals.set(idx, { nx: 0, ny: 0, nz: 0 });
+        }
+        const vn = vertexNormals.get(idx);
+        vn.nx += fn.x;
+        vn.ny += fn.y;
+        vn.nz += fn.z;
+      }
+    }
+
+    // Normalize averaged normals
+    for (const [idx, vn] of vertexNormals) {
+      const len = Math.sqrt(vn.nx * vn.nx + vn.ny * vn.ny + vn.nz * vn.nz);
+      if (len > 0) {
+        vn.nx /= len;
+        vn.ny /= len;
+        vn.nz /= len;
+      }
+    }
+
+    // Add vertex normals to each triangle
+    for (const tri of triangles) {
+      tri.vertexNormals = tri.indices.map(idx => {
+        const vn = vertexNormals.get(idx);
+        return { x: vn.nx, y: vn.ny, z: vn.nz };
       });
     }
 

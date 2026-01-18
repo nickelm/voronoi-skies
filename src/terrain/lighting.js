@@ -10,10 +10,58 @@
 export const LightingConfig = {
   azimuth: 315,       // Light direction: 0=N, 90=E, 180=S, 270=W (315=NW)
   elevation: 45,      // Angle above horizon in degrees (0=horizon, 90=overhead)
-  intensity: 0.3,     // Hillshade strength multiplier (0=flat, 1=full contrast)
-  ambient: 0.2,       // Minimum brightness floor (0=black shadows, 1=no shadows)
-  color: { r: 1.0, g: 1.0, b: 1.0 }  // Light color (neutral white default)
+  intensity: 1.0,     // Hillshade strength multiplier (0=flat, 1=full contrast)
+  ambient: 0.4,       // Minimum brightness floor (0=black shadows, 1=no shadows)
+  color: { r: 1.0, g: 0.98, b: 0.95 }  // Light color (warm white default)
 };
+
+/**
+ * Time-of-day lighting presets
+ */
+export const TimePresets = {
+  dawn: {
+    azimuth: 90,        // Sun rising from east
+    elevation: 15,      // Low on horizon
+    intensity: 0.9,
+    ambient: 0.3,
+    color: { r: 1.0, g: 0.6, b: 0.4 },   // Warm orange
+    sky: { r: 0.4, g: 0.25, b: 0.35 }    // Purple-pink dawn sky
+  },
+  noon: {
+    azimuth: 180,       // Sun from south
+    elevation: 75,      // High overhead
+    intensity: 1.0,
+    ambient: 0.5,
+    color: { r: 1.0, g: 0.98, b: 0.95 }, // Bright warm white
+    sky: { r: 0.1, g: 0.23, b: 0.32 }    // Blue sky (original)
+  },
+  night: {
+    azimuth: 270,       // Moon from west
+    elevation: 30,      // Medium height
+    intensity: 0.25,
+    ambient: 0.1,
+    color: { r: 0.6, g: 0.7, b: 1.0 },   // Cool blue moonlight
+    sky: { r: 0.02, g: 0.03, b: 0.08 }   // Dark night sky
+  }
+};
+
+/**
+ * Apply a time-of-day preset to the lighting configuration
+ * @param {string} presetName - 'dawn', 'noon', or 'night'
+ * @returns {Object|null} - The preset object if applied, null if not found
+ */
+export function applyTimePreset(presetName) {
+  const preset = TimePresets[presetName];
+  if (!preset) return null;
+
+  LightingConfig.azimuth = preset.azimuth;
+  LightingConfig.elevation = preset.elevation;
+  LightingConfig.intensity = preset.intensity;
+  LightingConfig.ambient = preset.ambient;
+  LightingConfig.color = { ...preset.color };
+
+  return preset;
+}
 
 /**
  * Convert azimuth and elevation to a 3D light direction vector
@@ -68,9 +116,9 @@ export function computeHillshadeFromGradient(gradX, gradY, lightDir) {
 
 /**
  * Apply hillshade lighting to a base color
- * Formula: luminance = ambient + (1 - ambient) * H * intensity
+ * Formula: luminance = ambient + dot * intensity * (1 - ambient)
  * @param {number} baseColor - RGB hex color (0xRRGGBB)
- * @param {number} hillshade - Raw hillshade value [0, 1]
+ * @param {number} hillshade - Raw hillshade value [0, 1] from dot(normal, lightDir)
  * @param {Object} config - Lighting configuration
  * @returns {number} - Modified RGB hex color
  */
@@ -82,25 +130,15 @@ export function applyHillshadeToColor(baseColor, hillshade, config = LightingCon
   const g = ((baseColor >> 8) & 0xFF);
   const b = (baseColor & 0xFF);
 
-  // Compute luminance factor
-  // ambient = minimum brightness, intensity controls how much hillshade affects brightness
-  const luminance = ambient + (1 - ambient) * hillshade * intensity;
+  // Compute luminance factor per spec:
+  // luminance = ambient + dot * intensity * (1 - ambient)
+  // This ensures: shadow (h=0) = ambient, full sun (h=1) = ambient + intensity*(1-ambient)
+  const luminance = ambient + hillshade * intensity * (1 - ambient);
 
-  // Apply light color tinting (stronger tint on brighter areas)
-  const tintStrength = hillshade * intensity * 0.5; // Subtle tinting
-
-  // Blend base color with light color based on luminance
-  let finalR = r * luminance;
-  let finalG = g * luminance;
-  let finalB = b * luminance;
-
-  // Add light color contribution for highlights
-  if (hillshade > 0.5) {
-    const highlightFactor = (hillshade - 0.5) * 2 * tintStrength;
-    finalR = finalR + (255 * color.r - finalR) * highlightFactor * 0.1;
-    finalG = finalG + (255 * color.g - finalG) * highlightFactor * 0.1;
-    finalB = finalB + (255 * color.b - finalB) * highlightFactor * 0.1;
-  }
+  // Apply luminance with light color tinting
+  const finalR = r * luminance * color.r;
+  const finalG = g * luminance * color.g;
+  const finalB = b * luminance * color.b;
 
   // Clamp and return
   return (Math.min(255, Math.max(0, Math.round(finalR))) << 16) |

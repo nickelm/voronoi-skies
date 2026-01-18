@@ -34,6 +34,7 @@ export class Chunk {
     // Mesh references for disposal
     this.cellMesh = null;
     this.edgeMesh = null;
+    this.waterMesh = null;
 
     // Generation state
     this.isGenerated = false;
@@ -61,6 +62,12 @@ export class Chunk {
       this.edgeMesh.geometry.dispose();
       this.edgeMesh.material.dispose();
       this.edgeMesh = null;
+    }
+
+    if (this.waterMesh) {
+      this.waterMesh.geometry.dispose();
+      this.waterMesh.material.dispose();
+      this.waterMesh = null;
     }
 
     if (this.group) {

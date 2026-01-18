@@ -267,12 +267,14 @@ export class ChunkManager {
   }
 
   /**
-   * Update lighting configuration and regenerate all chunks
+   * Update lighting configuration
+   * Note: With GPU lighting, this only updates the config values.
+   * Three.js lights should be updated separately in main.js.
    * @param {Object} updates - Partial lighting config updates
    */
   setLightingConfig(updates) {
     updateLightingConfig(updates);
-    this.regenerateAllChunks();
+    // No regeneration needed - GPU handles lighting in real-time
   }
 
   /**

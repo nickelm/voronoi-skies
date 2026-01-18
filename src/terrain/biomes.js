@@ -8,33 +8,33 @@ import { LightingConfig, applyHillshadeToColor } from './lighting.js';
 export const Biome = {
   // Water biomes
   DEEP_OCEAN: 0,
+  OCEAN: 11,         // Medium depth ocean
   SHALLOW_WATER: 1,
 
   // Coastal
   BEACH: 2,
 
   // Low elevation land
-  PLAINS: 3,
-  GRASSLAND: 4,
+  DESERT: 15,        // Dry low elevation
+  PLAINS: 3,         // Moderate moisture low elevation
+  GRASSLAND: 4,      // Wet low elevation
 
   // Medium elevation land
-  SHRUBLAND: 5,
-  FOREST: 6,
+  SHRUBLAND: 5,      // Dry medium elevation
+  FOREST: 6,         // Moderate-wet medium elevation
 
   // Medium-high elevation land
-  HIGHLAND: 7,
-  DENSE_FOREST: 8,
+  HIGHLAND: 7,       // Dry high elevation
+  DENSE_FOREST: 8,   // Wet high elevation
 
   // High elevation
   MOUNTAIN: 9,
   SNOW: 10,
 
-  // @deprecated - kept for backward compatibility
-  OCEAN: 11,
+  // @deprecated - kept for backward compatibility only
   SHALLOW_OCEAN: 12,
   ROCKY_COAST: 13,
   MARSH: 14,
-  DESERT: 15,
   SAVANNA: 16,
   ALPINE: 17,
   TUNDRA: 18,
@@ -78,17 +78,19 @@ export const BiomeColors = {
   [Biome.SNOW_PEAKS]:    [0xd0d8d5, 0xdae2df, 0xe4ece9]
 };
 
-// Elevation thresholds for biome lookup table
-const ELEV_DEEP_OCEAN = -0.3;
-const ELEV_WATER = 0;
-const ELEV_BEACH = 0.05;
-const ELEV_LOW = 0.3;
-const ELEV_MEDIUM = 0.5;
-const ELEV_HIGH = 0.7;
-const ELEV_MOUNTAIN = 0.85;
+// Elevation thresholds for biome lookup table (from specification)
+const ELEV_DEEP_OCEAN = -0.4;  // Below = deep ocean
+const ELEV_OCEAN = -0.1;       // -0.4 to -0.1 = ocean
+const ELEV_WATER = 0;          // -0.1 to 0 = shallow water
+const ELEV_BEACH = 0.08;       // 0 to 0.08 = beach
+const ELEV_LOW = 0.25;         // 0.08 to 0.25 = low land
+const ELEV_MEDIUM = 0.45;      // 0.25 to 0.45 = medium land
+const ELEV_HIGH = 0.65;        // 0.45 to 0.65 = high land
+const ELEV_MOUNTAIN = 0.8;     // 0.65 to 0.8 = mountain, above = snow
 
-// Moisture threshold: below = low, above = high
-const MOISTURE_THRESHOLD = 0.5;
+// Moisture thresholds: 3 bands (dry, moderate, wet)
+const MOISTURE_LOW = 0.3;      // Below = dry
+const MOISTURE_MID = 0.6;      // 0.3 to 0.6 = moderate, above = wet
 
 /**
  * Check if any neighbor is water (elevation < 0)
@@ -104,55 +106,61 @@ function hasWaterNeighbor(neighbors) {
 }
 
 /**
- * Determine biome from elevation and moisture with neighbor context
- * Uses lookup table approach with elevation thresholds
+ * Determine biome from elevation and moisture
+ * Uses lookup table approach matching the biome specification table
  * @param {number} elevation - Elevation value [-1, 1]
  * @param {number} moisture - Moisture value [0, 1]
- * @param {Object} neighbors - Neighbor elevation data (optional)
- * @param {number[]} neighbors.elevations - Array of neighbor cell elevations
+ * @param {Object} neighbors - Neighbor elevation data (unused, kept for API compatibility)
  * @returns {number} - Biome enum value
  */
 export function biome(elevation, moisture, neighbors = null) {
-  // Deep ocean: elev < -0.3
+  // Deep ocean: elev < -0.4
   if (elevation < ELEV_DEEP_OCEAN) {
     return Biome.DEEP_OCEAN;
   }
 
-  // Shallow water: -0.3 to 0
+  // Ocean: -0.4 to -0.1
+  if (elevation < ELEV_OCEAN) {
+    return Biome.OCEAN;
+  }
+
+  // Shallow water: -0.1 to 0
   if (elevation < ELEV_WATER) {
     return Biome.SHALLOW_WATER;
   }
 
-  // Beach zone: 0 to 0.05, but ONLY if neighbors water
+  // Beach: 0 to 0.08 (no neighbor check required)
   if (elevation < ELEV_BEACH) {
-    if (hasWaterNeighbor(neighbors)) {
-      return Biome.BEACH;
-    }
-    // Not adjacent to water - treat as low elevation land
-    return moisture < MOISTURE_THRESHOLD ? Biome.PLAINS : Biome.GRASSLAND;
+    return Biome.BEACH;
   }
 
-  // Low elevation: 0.05 to 0.3
+  // Low elevation: 0.08 to 0.25
   if (elevation < ELEV_LOW) {
-    return moisture < MOISTURE_THRESHOLD ? Biome.PLAINS : Biome.GRASSLAND;
+    if (moisture < MOISTURE_LOW) return Biome.DESERT;
+    if (moisture < MOISTURE_MID) return Biome.PLAINS;
+    return Biome.GRASSLAND;
   }
 
-  // Medium elevation: 0.3 to 0.5
+  // Medium elevation: 0.25 to 0.45
   if (elevation < ELEV_MEDIUM) {
-    return moisture < MOISTURE_THRESHOLD ? Biome.SHRUBLAND : Biome.FOREST;
+    if (moisture < MOISTURE_LOW) return Biome.SHRUBLAND;
+    if (moisture < MOISTURE_MID) return Biome.GRASSLAND;
+    return Biome.FOREST;
   }
 
-  // Medium-high elevation: 0.5 to 0.7
+  // Medium-high elevation: 0.45 to 0.65
   if (elevation < ELEV_HIGH) {
-    return moisture < MOISTURE_THRESHOLD ? Biome.HIGHLAND : Biome.DENSE_FOREST;
+    if (moisture < MOISTURE_LOW) return Biome.HIGHLAND;
+    if (moisture < MOISTURE_MID) return Biome.FOREST;
+    return Biome.DENSE_FOREST;
   }
 
-  // High elevation: 0.7 to 0.85
+  // Mountain: 0.65 to 0.8
   if (elevation < ELEV_MOUNTAIN) {
     return Biome.MOUNTAIN;
   }
 
-  // Snow: > 0.85
+  // Snow: > 0.8
   return Biome.SNOW;
 }
 
@@ -179,20 +187,26 @@ export function getBiome(cont, elev, moist) {
 }
 
 /**
- * Get final color for a cell
+ * Get base color for a cell (without hillshade applied)
+ * Used for GPU-based lighting where Three.js handles shading
  * @param {number} biome - Biome enum value
  * @param {number} elev - Elevation value [-1, 1]
  * @param {number} variation - Random variation seed [0, 1)
- * @param {number} hillshade - Hillshade value [0, 1], 1 = fully lit, 0 = in shadow
  * @returns {number} - RGB hex color
  */
-export function getCellColor(biome, elev, variation, hillshade = 0.5) {
+export function getBaseColor(biome, elev, variation) {
   const colors = BiomeColors[biome];
   if (!colors) return 0xFF00FF; // Magenta for missing biome (debug)
 
   // Use variation to select base shade (0, 1, or 2)
   const shadeIndex = Math.floor(variation * 3) % 3;
   let baseColor = colors[shadeIndex];
+
+  // Continuous subtle variation using fractional part of variation
+  // This creates smooth variation within each discrete shade
+  const fractionalVariation = (variation * 3) % 1;  // 0 to 1 within shade
+  const variationRange = 0.06;  // +/- 6% lightness variation
+  const variationOffset = (fractionalVariation - 0.5) * 2 * variationRange;
 
   // Normalize elevation from [-1, 1] to [0, 1] for shading
   const normalizedElev = (elev + 1) / 2;
@@ -201,20 +215,57 @@ export function getCellColor(biome, elev, variation, hillshade = 0.5) {
   // This is independent of directional lighting
   const elevationTint = normalizedElev * 0.08; // Max 8% lightening from elevation
 
-  // Apply elevation tint to base color
+  // Combined adjustment: elevation tint (always positive) + variation (can be negative)
+  const adjustment = elevationTint + variationOffset;
+
+  // Extract RGB components
   const r = ((baseColor >> 16) & 0xFF);
   const g = ((baseColor >> 8) & 0xFF);
   const b = (baseColor & 0xFF);
 
-  const tintedR = Math.min(255, r + Math.floor((255 - r) * elevationTint));
-  const tintedG = Math.min(255, g + Math.floor((255 - g) * elevationTint));
-  const tintedB = Math.min(255, b + Math.floor((255 - b) * elevationTint));
+  // Apply adjustment to each channel
+  const adjustColor = (c, adj) => {
+    if (adj >= 0) {
+      return Math.min(255, c + Math.floor((255 - c) * adj));
+    } else {
+      return Math.max(0, c + Math.floor(c * adj));
+    }
+  };
 
-  const tintedColor = (tintedR << 16) | (tintedG << 8) | tintedB;
+  let finalR = adjustColor(r, adjustment);
+  let finalG = adjustColor(g, adjustment);
+  let finalB = adjustColor(b, adjustment);
 
+  // Apply underwater depth darkening
+  if (elev < 0) {
+    // Smoothstep from 0 at surface to 1 at deep (-0.5)
+    const depthFactor = Math.min(1, Math.max(0, -elev / 0.5));
+    // Water tint color (dark blue-green)
+    const waterTint = { r: 26, g: 77, b: 102 };  // ~0x1a4d66
+
+    // Mix base color toward water tint (70% max blend at max depth)
+    const blend = depthFactor * 0.7;
+    finalR = Math.round(finalR * (1 - blend) + waterTint.r * blend);
+    finalG = Math.round(finalG * (1 - blend) + waterTint.g * blend);
+    finalB = Math.round(finalB * (1 - blend) + waterTint.b * blend);
+  }
+
+  return (finalR << 16) | (finalG << 8) | finalB;
+}
+
+/**
+ * Get final color for a cell (with CPU hillshade baked in)
+ * @deprecated Use getBaseColor() with GPU lighting instead
+ * @param {number} biome - Biome enum value
+ * @param {number} elev - Elevation value [-1, 1]
+ * @param {number} variation - Random variation seed [0, 1)
+ * @param {number} hillshade - Hillshade value [0, 1], 1 = fully lit, 0 = in shadow
+ * @returns {number} - RGB hex color
+ */
+export function getCellColor(biome, elev, variation, hillshade = 0.5) {
+  const baseColor = getBaseColor(biome, elev, variation);
   // Apply hillshade lighting using the lighting module
-  // This handles ambient, intensity, and light color
-  return applyHillshadeToColor(tintedColor, hillshade, LightingConfig);
+  return applyHillshadeToColor(baseColor, hillshade, LightingConfig);
 }
 
 // ============================================
