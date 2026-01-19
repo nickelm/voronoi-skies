@@ -486,37 +486,129 @@ function intersectLineWithViewport(fromX, fromZ, toX, toZ, corners) {
 }
 
 /**
- * Convert world position to screen position
+ * Convert world position to screen position using Three.js projection
+ * This properly accounts for perspective camera and terrain transforms
  */
 function worldToScreen(worldX, worldZ) {
-  // Offset from player in world space
-  const dx = worldX - player.x;
-  const dz = worldZ - player.y;
+  // Position in terrain group local coords (ground level z=0)
+  const terrainGroup = terrainRenderer.getTerrainGroup();
+  const localPos = new THREE.Vector3(worldX, worldZ, 0);
 
-  // Rotate by negative heading (world to screen)
-  const cos = Math.cos(-player.heading);
-  const sin = Math.sin(-player.heading);
-  const localX = dx * cos - dz * sin;
-  const localY = dx * sin + dz * cos;
+  // Transform from terrain group local space to world (scene) space
+  // This applies both terrainGroup and pivotGroup transforms
+  const scenePos = terrainGroup.localToWorld(localPos);
 
-  // Convert world units to screen pixels
-  // Use the same FOV-based calculation as getWorldViewport
-  const cameraZ = renderer.getCameraZ();
-  const fovRad = (renderer.getCamera().fov * Math.PI) / 180;
-  const visibleHeight = 2 * Math.tan(fovRad / 2) * (cameraZ - currentTerrainZ);
-  const visibleWidth = visibleHeight * (window.innerWidth / window.innerHeight);
+  // Project to screen using camera
+  const camera = renderer.getCamera();
+  scenePos.project(camera);
 
-  // World units to screen pixels ratio
-  const pixelsPerWorldUnit = window.innerHeight / visibleHeight;
-
-  // Player is at bottom-center of screen (seed position)
-  const playerSeedX = window.innerWidth / 2;
-  const playerSeedY = window.innerHeight * 0.7;
-
+  // Convert NDC (-1 to 1) to screen pixels
   return {
-    x: playerSeedX + localX * pixelsPerWorldUnit,
-    y: playerSeedY - localY * pixelsPerWorldUnit  // Y inverted
+    x: (scenePos.x + 1) / 2 * window.innerWidth,
+    y: (-scenePos.y + 1) / 2 * window.innerHeight  // Y is inverted in screen coords
   };
+}
+
+/**
+ * Check if a screen position is within screen bounds
+ */
+function isOnScreen(screenX, screenY) {
+  return screenX >= 0 && screenX <= window.innerWidth &&
+         screenY >= 0 && screenY <= window.innerHeight;
+}
+
+/**
+ * Get visibility status of the debug target
+ * @returns {Object|null} { visible: boolean, screenPos: {x, y} } or null if no target
+ */
+function getDebugTargetVisibility() {
+  if (!debugCellTargetWorld) return null;
+  const screenPos = worldToScreen(debugCellTargetWorld.x, debugCellTargetWorld.z);
+  return {
+    visible: isOnScreen(screenPos.x, screenPos.y),
+    screenPos
+  };
+}
+
+/**
+ * Find intersection of ray from (x0,y0) toward (x1,y1) with screen rectangle
+ * @returns {Object|null} { x, y } intersection point, or null
+ */
+function rayRectIntersectionScreen(x0, y0, x1, y1) {
+  const left = 0, top = 0;
+  const right = window.innerWidth, bottom = window.innerHeight;
+  const dx = x1 - x0, dy = y1 - y0;
+
+  let hitT = Infinity;
+  let hitPoint = null;
+
+  // Left edge
+  if (dx !== 0) {
+    let t = (left - x0) / dx;
+    let y = y0 + t * dy;
+    if (t > 0 && y >= top && y <= bottom && t < hitT) {
+      hitT = t;
+      hitPoint = { x: left, y };
+    }
+  }
+
+  // Right edge
+  if (dx !== 0) {
+    let t = (right - x0) / dx;
+    let y = y0 + t * dy;
+    if (t > 0 && y >= top && y <= bottom && t < hitT) {
+      hitT = t;
+      hitPoint = { x: right, y };
+    }
+  }
+
+  // Top edge
+  if (dy !== 0) {
+    let t = (top - y0) / dy;
+    let x = x0 + t * dx;
+    if (t > 0 && x >= left && x <= right && t < hitT) {
+      hitT = t;
+      hitPoint = { x, y: top };
+    }
+  }
+
+  // Bottom edge
+  if (dy !== 0) {
+    let t = (bottom - y0) / dy;
+    let x = x0 + t * dx;
+    if (t > 0 && x >= left && x <= right && t < hitT) {
+      hitT = t;
+      hitPoint = { x, y: bottom };
+    }
+  }
+
+  return hitPoint;
+}
+
+/**
+ * Get screen center (camera position) for edge intersection ray origin
+ */
+function getScreenCenter() {
+  return {
+    x: window.innerWidth / 2,
+    y: window.innerHeight / 2
+  };
+}
+
+/**
+ * Compute edge intersection point for off-screen debug target
+ * @returns {Object|null} { x, y } screen position of edge point, or null
+ */
+function computeEdgeIntersection() {
+  if (!debugCellTargetWorld) return null;
+  const screenPos = worldToScreen(debugCellTargetWorld.x, debugCellTargetWorld.z);
+  if (isOnScreen(screenPos.x, screenPos.y)) return null;
+
+  // Ray from screen center to target
+  const center = getScreenCenter();
+  const edgePoint = rayRectIntersectionScreen(center.x, center.y, screenPos.x, screenPos.y);
+
+  return edgePoint;
 }
 
 /**
@@ -651,6 +743,10 @@ function update(deltaTime) {
 
   // Update debug cell camera if active
   updateDebugCellCamera();
+
+  // Update edge marker for off-screen target
+  const edgePos = computeEdgeIntersection();
+  voronoiCellManager.borderRenderer.updateEdgeMarker(edgePos);
 }
 
 /**
@@ -698,6 +794,21 @@ function updateDebug(deltaTime) {
       }
     }
 
+    // Get debug target visibility info
+    let targetVisibilityInfo = 'None (V to drop)';
+    let edgeInfo = 'N/A';
+    if (debugCellTargetWorld) {
+      const visibility = getDebugTargetVisibility();
+      if (visibility) {
+        targetVisibilityInfo = visibility.visible ? 'VISIBLE' : 'OFF-SCREEN';
+        targetVisibilityInfo += ` (${Math.round(visibility.screenPos.x)}, ${Math.round(visibility.screenPos.y)})`;
+      }
+      const edgePos = computeEdgeIntersection();
+      if (edgePos) {
+        edgeInfo = `(${Math.round(edgePos.x)}, ${Math.round(edgePos.y)})`;
+      }
+    }
+
     debugElement.innerHTML = [
       `FPS: ${fps}`,
       `X: ${Math.round(player.x)}`,
@@ -713,6 +824,9 @@ function updateDebug(deltaTime) {
       `--- VORONOI CELLS ---`,
       `CELLS: ${voronoiCellManager ? voronoiCellManager.cells.length : 0}`,
       `CELL STATE: ${cellStateInfo}`,
+      `--- DEBUG TARGET (V) ---`,
+      `TARGET: ${targetVisibilityInfo}`,
+      `EDGE: ${edgeInfo}`,
       `--- AIRBASE ---`,
       `NEAR: ${airbaseInfo}`,
       `RENDERED: ${airbaseRenderer ? airbaseRenderer.getRenderedCount() : 0}`,

@@ -23,6 +23,14 @@ export class CellBorderRenderer {
 
     // Border mesh (LineSegments)
     this.borderMesh = null;
+
+    // Edge marker for off-screen target indicator
+    this.edgeMarkerMesh = null;
+    this.edgeMarkerMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffff00,
+      depthTest: false,
+      depthWrite: false
+    });
   }
 
   /**
@@ -79,14 +87,46 @@ export class CellBorderRenderer {
   }
 
   /**
+   * Update edge marker position for off-screen target indicator
+   * @param {Object|null} screenPos - { x, y } in screen coordinates, or null to hide
+   */
+  updateEdgeMarker(screenPos) {
+    // Remove existing marker
+    if (this.edgeMarkerMesh) {
+      this.scene.remove(this.edgeMarkerMesh);
+      this.edgeMarkerMesh.geometry.dispose();
+      this.edgeMarkerMesh = null;
+    }
+
+    if (!screenPos) return;
+
+    // Convert to NDC
+    const [ndcX, ndcY] = this.screenToNDC(screenPos.x, screenPos.y);
+
+    // Create a small circle at the edge point
+    const geometry = new THREE.CircleGeometry(0.015, 16);
+    this.edgeMarkerMesh = new THREE.Mesh(geometry, this.edgeMarkerMaterial);
+    this.edgeMarkerMesh.position.set(ndcX, ndcY, 0);
+    this.scene.add(this.edgeMarkerMesh);
+  }
+
+  /**
    * Render borders (call after all cells have been rendered)
    * @param {THREE.WebGLRenderer} renderer - The Three.js renderer
    */
   render(renderer) {
-    if (!this.borderMesh) return;
+    if (!this.borderMesh && !this.edgeMarkerMesh) return;
 
-    // Disable depth test so borders draw on top
     const gl = renderer.getContext();
+
+    // Reset viewport to full screen (in case it was changed)
+    renderer.setViewport(0, 0, window.innerWidth, window.innerHeight);
+    renderer.setScissorTest(false);
+
+    // Ensure stencil test is disabled so we can draw everywhere
+    gl.disable(gl.STENCIL_TEST);
+
+    // Disable depth test so borders/markers draw on top
     gl.disable(gl.DEPTH_TEST);
 
     renderer.render(this.scene, this.camera);
@@ -112,6 +152,10 @@ export class CellBorderRenderer {
     if (this.borderMesh) {
       this.borderMesh.geometry.dispose();
     }
+    if (this.edgeMarkerMesh) {
+      this.edgeMarkerMesh.geometry.dispose();
+    }
     this.borderMaterial.dispose();
+    this.edgeMarkerMaterial.dispose();
   }
 }
