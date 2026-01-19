@@ -49,10 +49,14 @@ export function init(container) {
   camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, 1, 20000);
   camera.position.z = CAMERA_Z;
 
-  // Create WebGL renderer
-  renderer = new THREE.WebGLRenderer({ antialias: false });
+  // Create WebGL renderer with stencil buffer for Voronoi cell masking
+  renderer = new THREE.WebGLRenderer({
+    antialias: false,
+    stencil: true  // Enable stencil buffer for cell masking
+  });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(1); // Keep pixelated look
+  renderer.autoClear = false;  // Manual clear control for multi-pass rendering
   container.appendChild(renderer.domElement);
 
   // Post-processing is disabled for now
@@ -158,4 +162,14 @@ export function getCamera() {
 
 export function getRenderer() {
   return renderer;
+}
+
+/**
+ * Clear specific buffers manually
+ * Used for multi-pass rendering with stencil masking
+ */
+export function clearBuffers(color = true, depth = true, stencil = true) {
+  if (renderer) {
+    renderer.clear(color, depth, stencil);
+  }
 }

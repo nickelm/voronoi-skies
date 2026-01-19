@@ -9,11 +9,13 @@ import { Aircraft } from './entities/aircraft.js';
 import { TerrainRenderer } from './terrain/TerrainRenderer.js';
 import { ChunkManager } from './terrain/ChunkManager.js';
 import { LightingConfig, applyTimePreset } from './terrain/lighting.js';
+import { VoronoiCellManager } from './voronoi/VoronoiCellManager.js';
 
 // Game state
 let player = null;
 let terrainRenderer = null;
 let chunkManager = null;
+let voronoiCellManager = null;
 let lastTime = 0;
 let debugElement = null;
 let currentTerrainZ = 0;
@@ -84,6 +86,12 @@ function init() {
 
   // Set up lighting keyboard controls
   initLightingControls();
+
+  // Initialize Voronoi cell manager for split-screen rendering
+  const threeRenderer = renderer.getRenderer();
+  const mainCamera = renderer.getCamera();
+  voronoiCellManager = new VoronoiCellManager(threeRenderer, scene, mainCamera);
+  voronoiCellManager.initTestCells();
 
   // Start game loop
   lastTime = performance.now();
@@ -342,10 +350,14 @@ function update(deltaTime) {
 
   // Update terrain blur based on altitude (currently disabled)
   renderer.updateBlur(player.altitude);
+
+  // Update Voronoi cell cameras
+  voronoiCellManager.updateCameras();
 }
 
 function render() {
-  renderer.render();
+  // Use Voronoi cell manager for multi-pass stencil rendering
+  voronoiCellManager.render();
 }
 
 function updateDebug(deltaTime) {
