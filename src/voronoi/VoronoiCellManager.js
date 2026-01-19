@@ -1,6 +1,9 @@
 /**
  * VoronoiCellManager - Orchestrates Voronoi cell rendering
  * Manages cells, computes tessellation, and coordinates multi-pass rendering
+ *
+ * Key principle: Write ALL masks to stencil first, THEN render all scenes
+ * (Interleaving mask/scene per cell destroys previous stencil values)
  */
 
 import * as THREE from 'three';
@@ -119,51 +122,53 @@ export class VoronoiCellManager {
 
   /**
    * Render all cells with stencil masking
-   * This replaces the single renderer.render() call
+   *
+   * CRITICAL: Write ALL masks first, THEN render all scenes
+   * This follows the validated pattern from stencil-test.html
    */
   render() {
-    // Clear all buffers at start of frame
+    const gl = this.renderer.getContext();
+
+    // 1. Clear ALL buffers once with explicit background color (#1a3a52)
+    gl.clearColor(0.102, 0.227, 0.322, 1);
     this.renderer.clear(true, true, true);
 
-    // Render each cell separately - write mask then render scene immediately
+    // 2. Write ALL masks to stencil buffer FIRST
+    const cellData = [];
     for (let i = 0; i < this.cells.length; i++) {
       const cell = this.cells[i];
-      const stencilRef = i + 1;
       if (!cell.polygon) continue;
 
-      // 1. Clear stencil renderer and add just this cell's mask
-      this.stencilRenderer.clearMasks();
-      this.stencilRenderer.writeStencilMask(cell, stencilRef);
-
-      // 2. Render this mask to stencil buffer
-      this.stencilRenderer.renderMasksToStencil();
-
-      // 3. Set scissor to cell's AABB (optimization)
-      const scissorY = window.innerHeight - cell.aabb.y - cell.aabb.height;
-      this.renderer.setScissor(cell.aabb.x, scissorY, cell.aabb.width, cell.aabb.height);
-      this.renderer.setScissorTest(true);
-
-      // 4. Clear depth buffer for this cell (keep color and stencil)
-      this.renderer.clear(false, true, false);
-
-      // 5. Enable stencil test using raw WebGL (before Three.js can reset it)
-      const gl = this.renderer.getContext();
-      gl.enable(gl.STENCIL_TEST);
-      gl.stencilFunc(gl.EQUAL, stencilRef, 0xff);
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-      gl.stencilMask(0x00);  // Don't write to stencil during scene render
-
-      // 6. Render scene with cell's camera
-      this.renderer.render(this.scene, cell.camera);
-
-      // 7. Disable stencil test
-      gl.disable(gl.STENCIL_TEST);
-
-      // 8. Disable scissor for next cell
-      this.renderer.setScissorTest(false);
+      const stencilRef = i + 1;  // ref 0 means "no cell"
+      const maskMesh = this.stencilRenderer.createPolygonMesh(cell.polygon, stencilRef);
+      if (maskMesh) {
+        this.stencilRenderer.writeMaskToStencil(maskMesh, stencilRef);
+        cellData.push({ mesh: maskMesh, ref: stencilRef, cell });
+      }
     }
 
-    // Render borders on top
+    // 3. Render scene for EACH cell where stencil matches its ref value
+    for (const { mesh, ref, cell } of cellData) {
+      // Clear depth only (preserve color and stencil)
+      this.renderer.clearDepth();
+
+      // Configure stencil test: only render where stencil == ref
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.EQUAL, ref, 0xFF);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+      gl.stencilMask(0x00);  // Don't modify stencil during scene render
+
+      // Render scene with cell's camera
+      this.renderer.render(this.scene, cell.camera);
+
+      gl.disable(gl.STENCIL_TEST);
+
+      // Dispose mask mesh (created fresh each frame)
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+
+    // 4. Render borders on top (no stencil test)
     this.borderRenderer.render(this.renderer);
   }
 

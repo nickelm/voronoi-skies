@@ -41,7 +41,7 @@ const TERRAIN_Z_LERP_SPEED = 5.0;
 export function init(container) {
   // Create scene
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x1a3a52);
+  scene.background = null;  // Prevent auto-clearing during multi-pass stencil rendering
 
   // Set up perspective camera for altitude effect
   // Far plane must accommodate terrain at max altitude (Z = -15000 from camera at Z = 600)

@@ -1,6 +1,7 @@
 /**
  * StencilRenderer - Handles stencil buffer operations for Voronoi cell masking
- * Writes cell polygons to the stencil buffer and manages stencil testing
+ * Uses raw WebGL calls for reliable stencil control (Three.js material properties don't work)
+ * Uses NDC coordinates [-1, 1] for mask geometry
  */
 
 import * as THREE from 'three';
@@ -13,103 +14,64 @@ export class StencilRenderer {
     this.renderer = renderer;
     this.gl = renderer.getContext();
 
-    // Orthographic camera for screen-space stencil mask rendering
-    // Use same settings as working debug camera: near=-1, far=1, no position offset
-    this.maskCamera = new THREE.OrthographicCamera(
-      0, window.innerWidth,
-      window.innerHeight, 0,
-      -1, 1
-    );
-    // Don't set position.z - leave at 0 like the working debug camera
-
-    // DEBUG: Log camera setup
-    console.log('StencilRenderer: maskCamera setup', {
-      left: 0, right: window.innerWidth,
-      top: window.innerHeight, bottom: 0,
-      position: this.maskCamera.position.clone()
-    });
+    // Orthographic camera in NDC coordinates: [-1, 1] range
+    // This matches the working stencil-test.html approach
+    this.maskCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     // Scene for stencil mask geometry
     this.maskScene = new THREE.Scene();
   }
 
   /**
-   * Create a material for stencil writing
-   * @param {number} stencilRef - The stencil reference value
+   * Convert screen coordinates to NDC [-1, 1]
+   * @param {number} screenX - Screen X (0 = left edge)
+   * @param {number} screenY - Screen Y (0 = top edge)
+   * @returns {Array} [ndcX, ndcY] in range [-1, 1]
    */
-  createStencilMaterial(stencilRef) {
-    // DEBUG: Make mask visible to verify polygon shape
-    // Set colorWrite to true and add a color to see the mask
-    const debugVisible = true;
-
-    return new THREE.MeshBasicMaterial({
-      color: debugVisible ? (stencilRef === 1 ? 0xff0000 : 0x0000ff) : 0x000000,
-      colorWrite: debugVisible,  // Set to false for production
-      depthWrite: false,
-      stencilWrite: true,
-      stencilRef: stencilRef,
-      stencilFunc: THREE.AlwaysStencilFunc,
-      stencilZPass: THREE.ReplaceStencilOp,
-      stencilZFail: THREE.ReplaceStencilOp,
-      stencilFail: THREE.ReplaceStencilOp
-    });
+  screenToNDC(screenX, screenY) {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    // NDC: X from -1 (left) to 1 (right)
+    // NDC: Y from -1 (bottom) to 1 (top) - inverted from screen coords
+    const ndcX = (screenX / width) * 2 - 1;
+    const ndcY = 1 - (screenY / height) * 2;
+    return [ndcX, ndcY];
   }
 
   /**
-   * Create a mesh from polygon vertices
-   * @param {Array} polygon - Array of [x, y] screen-space vertices (Y=0 at top)
-   * @param {number} stencilRef - Stencil reference value
+   * Create a mesh from polygon vertices in screen coordinates
+   * Converts to NDC and uses fan triangulation
+   * @param {Array} polygon - Array of [x, y] screen-space vertices
+   * @param {number} stencilRef - Stencil reference value (unused, kept for API compat)
    * @returns {THREE.Mesh|null}
    */
   createPolygonMesh(polygon, stencilRef) {
     if (!polygon || polygon.length < 3) return null;
 
-    const height = window.innerHeight;
+    // Convert polygon vertices to NDC
+    const ndcVertices = polygon.map(([x, y]) => this.screenToNDC(x, y));
 
-    // DEBUG: Log raw polygon coordinates
-    console.log(`  Raw polygon coords:`, polygon.map(p => `(${p[0].toFixed(0)}, ${p[1].toFixed(0)})`).join(', '));
-
-    // DEBUG: Try using BufferGeometry with manual triangulation instead of ShapeGeometry
-    // For now, create a simple test triangle to verify the rendering works
-    const geometry = new THREE.BufferGeometry();
-
-    // Convert polygon to flipped Y coordinates
-    const flippedY = (y) => height - y;
-    const vertices = [];
-
-    // Simple fan triangulation from first vertex
-    // polygon[0] is the pivot, create triangles: 0-1-2, 0-2-3, 0-3-4, etc.
-    for (let i = 1; i < polygon.length - 2; i++) {
-      // Triangle: polygon[0], polygon[i], polygon[i+1]
-      vertices.push(
-        polygon[0][0], flippedY(polygon[0][1]), 0,
-        polygon[i][0], flippedY(polygon[i][1]), 0,
-        polygon[i + 1][0], flippedY(polygon[i + 1][1]), 0
+    // Fan triangulation from first vertex
+    // For polygon [0, 1, 2, 3, 4], create triangles: 0-1-2, 0-2-3, 0-3-4
+    const positions = [];
+    for (let i = 1; i < ndcVertices.length - 1; i++) {
+      positions.push(
+        ndcVertices[0][0], ndcVertices[0][1], 0,
+        ndcVertices[i][0], ndcVertices[i][1], 0,
+        ndcVertices[i + 1][0], ndcVertices[i + 1][1], 0
       );
     }
 
-    console.log(`  Created ${vertices.length / 9} triangles from ${polygon.length} vertices`);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
 
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geometry.computeBoundingBox();
-    console.log(`  Computed bounding box:`, geometry.boundingBox);
-
-    // Use stencil-writing material
-    // colorWrite: false for production (invisible mask)
-    // Set to true with colors for debugging
-    const DEBUG_VISIBLE = false;
-
+    // Simple material - NO Three.js stencil properties (they don't work reliably)
+    // colorWrite: false makes mask invisible
+    // depthWrite/depthTest: false prevents depth buffer interference
     const material = new THREE.MeshBasicMaterial({
-      color: DEBUG_VISIBLE ? (stencilRef === 1 ? 0xff0000 : 0x0000ff) : 0x000000,
-      colorWrite: DEBUG_VISIBLE,
+      colorWrite: false,
       depthWrite: false,
       depthTest: false,
-      stencilWrite: true,
-      stencilRef: stencilRef,
-      stencilFunc: THREE.AlwaysStencilFunc,
-      stencilZPass: THREE.ReplaceStencilOp,
-      stencilZFail: THREE.ReplaceStencilOp,
-      stencilFail: THREE.ReplaceStencilOp,
       side: THREE.DoubleSide
     });
 
@@ -117,87 +79,45 @@ export class StencilRenderer {
   }
 
   /**
-   * Add a cell's polygon mask to the scene (doesn't render yet)
-   * @param {VoronoiCell} cell - Cell with polygon data
-   * @param {number} stencilRef - Stencil reference value (unique per cell)
+   * Write a single mask to stencil buffer using raw WebGL
+   * @param {THREE.Mesh} maskMesh - The mask geometry
+   * @param {number} refValue - Stencil reference value to write
    */
-  writeStencilMask(cell, stencilRef) {
-    // Create mask mesh from cell polygon with stencil material
-    const mesh = this.createPolygonMesh(cell.polygon, stencilRef);
-    if (!mesh) return;
-
-    this.maskScene.add(mesh);
-  }
-
-  /**
-   * Clear all masks from the scene
-   */
-  clearMasks() {
-    while (this.maskScene.children.length > 0) {
-      const mesh = this.maskScene.children[0];
-      mesh.geometry.dispose();
-      mesh.material.dispose();
-      this.maskScene.remove(mesh);
-    }
-    this.maskMesh = null;
-  }
-
-  /**
-   * Render all masks to the stencil buffer
-   * Call this once after adding all masks, before rendering scenes
-   */
-  renderMasksToStencil() {
-    if (this.maskScene.children.length === 0) return;
-
-    // Enable stencil writing
-    const state = this.renderer.state;
-    state.buffers.stencil.setTest(true);
-    state.buffers.stencil.setMask(0xff);
-
-    // Render the mask scene (writes to stencil buffer via material properties)
-    this.renderer.render(this.maskScene, this.maskCamera);
-  }
-
-  /**
-   * Enable stencil test for scene rendering
-   * Only pixels where stencil equals ref will be drawn
-   * Uses Three.js state to ensure settings persist through render call
-   * @param {number} stencilRef - Stencil reference value to test against
-   */
-  enableStencilTest(stencilRef) {
+  writeMaskToStencil(maskMesh, refValue) {
     const gl = this.gl;
-    const state = this.renderer.state;
 
-    // Use Three.js state management to enable stencil
-    state.buffers.stencil.setTest(true);
-    state.buffers.stencil.setFunc(gl.EQUAL, stencilRef, 0xff);
-    state.buffers.stencil.setOp(gl.KEEP, gl.KEEP, gl.KEEP);
-    state.buffers.stencil.setMask(0x00);
-  }
+    // Configure stencil to write refValue wherever mask renders
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.ALWAYS, refValue, 0xFF);
+    gl.stencilOp(gl.REPLACE, gl.REPLACE, gl.REPLACE);
+    gl.stencilMask(0xFF);
 
-  /**
-   * Disable stencil test
-   */
-  disableStencilTest() {
-    const state = this.renderer.state;
-    state.buffers.stencil.setTest(false);
+    // Render mask to write stencil values
+    this.maskScene.add(maskMesh);
+    this.renderer.render(this.maskScene, this.maskCamera);
+    this.maskScene.remove(maskMesh);
+
+    gl.disable(gl.STENCIL_TEST);
   }
 
   /**
    * Handle window resize
-   * @param {number} width - New window width
-   * @param {number} height - New window height
+   * NDC camera is fixed [-1, 1], no update needed
    */
   onResize(width, height) {
-    this.maskCamera.right = width;
-    this.maskCamera.top = height;
-    this.maskCamera.updateProjectionMatrix();
+    // NDC camera doesn't need updating - coordinates are normalized
   }
 
   /**
    * Clean up resources
    */
   dispose() {
-    this.clearMasks();
+    // Clean up any remaining meshes in the scene
+    while (this.maskScene.children.length > 0) {
+      const mesh = this.maskScene.children[0];
+      if (mesh.geometry) mesh.geometry.dispose();
+      if (mesh.material) mesh.material.dispose();
+      this.maskScene.remove(mesh);
+    }
   }
 }

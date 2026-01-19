@@ -1,20 +1,16 @@
 /**
  * CellBorderRenderer - Draws borders between Voronoi cells
  * Renders as an overlay on top of all cells (no stencil masking)
+ * Uses NDC coordinates [-1, 1] to match StencilRenderer
  */
 
 import * as THREE from 'three';
 
 export class CellBorderRenderer {
   constructor() {
-    // Orthographic camera for screen-space border rendering
-    // Camera positioned at Z=1 looking at Z=0 where the border geometry is
-    this.camera = new THREE.OrthographicCamera(
-      0, window.innerWidth,
-      window.innerHeight, 0,
-      0.1, 10
-    );
-    this.camera.position.z = 1;
+    // Orthographic camera in NDC coordinates: [-1, 1] range
+    // Matches the mask camera in StencilRenderer
+    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     // Scene for border geometry
     this.scene = new THREE.Scene();
@@ -27,6 +23,20 @@ export class CellBorderRenderer {
 
     // Border mesh (LineSegments)
     this.borderMesh = null;
+  }
+
+  /**
+   * Convert screen coordinates to NDC [-1, 1]
+   * @param {number} screenX - Screen X (0 = left edge)
+   * @param {number} screenY - Screen Y (0 = top edge)
+   * @returns {Array} [ndcX, ndcY] in range [-1, 1]
+   */
+  screenToNDC(screenX, screenY) {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const ndcX = (screenX / width) * 2 - 1;
+    const ndcY = 1 - (screenY / height) * 2;
+    return [ndcX, ndcY];
   }
 
   /**
@@ -43,20 +53,17 @@ export class CellBorderRenderer {
 
     if (!cells || cells.length === 0) return;
 
-    const height = window.innerHeight;
     const positions = [];
 
-    // Collect all cell edges
-    // Flip Y coordinate: screen Y=0 at top -> WebGL Y=height at top
+    // Collect all cell edges and convert to NDC
     for (const cell of cells) {
       if (!cell.polygon) continue;
 
       const polygon = cell.polygon;
       for (let i = 0; i < polygon.length - 1; i++) {
-        positions.push(
-          polygon[i][0], height - polygon[i][1], 0,
-          polygon[i + 1][0], height - polygon[i + 1][1], 0
-        );
+        const [x1, y1] = this.screenToNDC(polygon[i][0], polygon[i][1]);
+        const [x2, y2] = this.screenToNDC(polygon[i + 1][0], polygon[i + 1][1]);
+        positions.push(x1, y1, 0, x2, y2, 0);
       }
     }
 
@@ -90,13 +97,12 @@ export class CellBorderRenderer {
 
   /**
    * Handle window resize
-   * @param {number} width - New window width
-   * @param {number} height - New window height
+   * NDC camera is fixed [-1, 1], no update needed
+   * Border geometry will be rebuilt when computeVoronoi() is called
    */
   onResize(width, height) {
-    this.camera.right = width;
-    this.camera.top = height;
-    this.camera.updateProjectionMatrix();
+    // NDC camera doesn't need updating - coordinates are normalized
+    // Borders will be rebuilt via updateFromCells() after Voronoi recomputation
   }
 
   /**
