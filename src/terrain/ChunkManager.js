@@ -16,6 +16,7 @@ export class ChunkManager {
    * @param {string} config.boundaryMode - Boundary rendering mode: 'none', 'darker', 'biome' (default: 'none')
    * @param {THREE.Group} config.terrainGroup - Parent group for chunk meshes
    * @param {function} config.onLoadProgress - Callback for loading progress (loaded, total)
+   * @param {Object} [config.airbaseRegistry] - AirbaseRegistry for terrain flattening
    */
   constructor(config) {
     this.worldSeed = config.worldSeed || 42;
@@ -25,6 +26,9 @@ export class ChunkManager {
     this.boundaryMode = config.boundaryMode || BoundaryMode.NONE;
     this.terrainGroup = config.terrainGroup;
     this.onLoadProgress = config.onLoadProgress || null;
+
+    // Airbase registry for terrain flattening
+    this.airbaseRegistry = config.airbaseRegistry || null;
 
     // Active chunks: Map<string, Chunk>
     this.chunks = new Map();
@@ -322,6 +326,21 @@ export class ChunkManager {
   }
 
   /**
+   * Get chunk bounds as [minX, minZ, maxX, maxZ]
+   * @param {number} chunkX
+   * @param {number} chunkY
+   * @returns {Array}
+   */
+  getChunkBounds(chunkX, chunkY) {
+    return [
+      chunkX * this.chunkSize,
+      chunkY * this.chunkSize,
+      (chunkX + 1) * this.chunkSize,
+      (chunkY + 1) * this.chunkSize
+    ];
+  }
+
+  /**
    * Load a specific chunk via worker
    * @param {number} chunkX
    * @param {number} chunkY
@@ -344,6 +363,14 @@ export class ChunkManager {
 
     const requestId = this.nextRequestId++;
 
+    // Get flatten zones from airbase registry if available
+    let flattenZones = [];
+    if (this.airbaseRegistry) {
+      const bounds = this.getChunkBounds(chunkX, chunkY);
+      const airbases = this.airbaseRegistry.getAirbasesInBounds(bounds);
+      flattenZones = airbases.map(ab => ab.flattenZone.serialize());
+    }
+
     // Dispatch to worker
     this.worker.postMessage({
       type: 'generate',
@@ -353,7 +380,8 @@ export class ChunkManager {
         chunkY,
         chunkSize: this.chunkSize,
         gridSpacing: this.gridSpacing,
-        aoConfig: { ...AOConfig }
+        aoConfig: { ...AOConfig },
+        flattenZones
       }
     });
 

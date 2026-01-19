@@ -42,7 +42,65 @@ export class VoronoiCellManager {
   }
 
   /**
-   * Initialize with two hardcoded test cells
+   * Initialize with player cell only
+   * Other cells (airbase, target) are added dynamically by controllers
+   */
+  initPlayerCell() {
+    // Player cell: seed at bottom-center of screen
+    const playerCell = new VoronoiCell({
+      id: 0,
+      type: 'player'
+    });
+    playerCell.seed = {
+      x: window.innerWidth / 2,
+      y: window.innerHeight * 0.7
+    };
+
+    this.cells = [playerCell];
+    this.computeVoronoi();
+
+    console.log('VoronoiCellManager: Initialized player cell');
+  }
+
+  /**
+   * Add a new cell dynamically
+   * @param {string} type - Cell type identifier ('airbase', 'target', etc.)
+   * @returns {VoronoiCell} The created cell
+   */
+  addCell(type) {
+    const id = this.cells.length;
+    const cell = new VoronoiCell({ id, type });
+    this.cells.push(cell);
+    console.log(`VoronoiCellManager: Added ${type} cell (id=${id})`);
+    return cell;
+  }
+
+  /**
+   * Remove a cell by reference
+   * @param {VoronoiCell} cell - Cell to remove
+   */
+  removeCell(cell) {
+    const index = this.cells.indexOf(cell);
+    if (index !== -1) {
+      this.cells.splice(index, 1);
+      // Re-index remaining cells
+      this.cells.forEach((c, i) => c.id = i);
+      this.computeVoronoi();
+      console.log(`VoronoiCellManager: Removed cell, ${this.cells.length} cells remaining`);
+    }
+  }
+
+  /**
+   * Get player cell (always type 'player')
+   * @returns {VoronoiCell|null}
+   */
+  getPlayerCell() {
+    return this.cells.find(c => c.type === 'player') || null;
+  }
+
+  /**
+   * @deprecated Use initPlayerCell() instead
+   * Initialize with two hardcoded test cells (kept for backwards compatibility)
    */
   initTestCells() {
     // Player cell: seed at bottom-center of screen
@@ -100,23 +158,18 @@ export class VoronoiCellManager {
 
   /**
    * Update cell cameras based on main camera
-   * For Chunk 1: player cell matches main camera, target cell has different FOV
-   * to visually prove stencil masking works
+   * Player cell copies main camera; other cell types are managed externally
    */
   updateCameras() {
     if (!this.mainCamera) return;
 
-    // Player cell (cell 0) uses main camera exactly
-    if (this.cells[0]) {
-      this.cells[0].updateCameraFromMain(this.mainCamera);
-    }
-
-    // Target cell (cell 1) uses different FOV to prove independent rendering
-    if (this.cells[1]) {
-      this.cells[1].updateCameraFromMain(this.mainCamera);
-      // Wider FOV makes terrain appear smaller/zoomed out
-      this.cells[1].camera.fov = 90;
-      this.cells[1].camera.updateProjectionMatrix();
+    for (const cell of this.cells) {
+      if (cell.type === 'player') {
+        // Player cell uses main camera exactly
+        cell.updateCameraFromMain(this.mainCamera);
+      }
+      // 'airbase' cells are managed by AirbaseCellController
+      // 'target' cells would be managed by a future TargetCellController
     }
   }
 

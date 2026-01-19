@@ -15,6 +15,88 @@ let currentWorldSeed = null;
 // Elevation scaling factor: maps noise [-1, 1] to world units (feet)
 const ELEVATION_SCALE = 400;
 
+// Flatten zone helper functions (matching AirbaseFlattenZone logic)
+
+/**
+ * Smoothstep interpolation
+ */
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Linear interpolation
+ */
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+/**
+ * Check if a point is affected by a flatten zone and return modified elevation
+ * @param {Object} zone - Serialized flatten zone data
+ * @param {number} worldX
+ * @param {number} worldY - Note: terrain uses Y for the second horizontal axis
+ * @param {number} naturalElevation
+ * @returns {{elevation: number, modified: boolean}}
+ */
+function checkFlattenZone(zone, worldX, worldY, naturalElevation) {
+  // Quick AABB rejection
+  if (worldX < zone.bounds.minX || worldX > zone.bounds.maxX ||
+      worldY < zone.bounds.minZ || worldY > zone.bounds.maxZ) {
+    return { elevation: naturalElevation, modified: false };
+  }
+
+  // Transform to runway-local coordinates
+  const dx = worldX - zone.centerX;
+  const dy = worldY - zone.centerZ;
+  const along = dx * zone.cosHeading - dy * zone.sinHeading;
+  const across = dx * zone.sinHeading + dy * zone.cosHeading;
+
+  // Check if inside runway rectangle
+  if (Math.abs(along) <= zone.halfLength && Math.abs(across) <= zone.halfWidth) {
+    return { elevation: zone.targetElevation, modified: true };
+  }
+
+  // Compute distance from runway edge
+  const distAlong = Math.max(0, Math.abs(along) - zone.halfLength);
+  const distAcross = Math.max(0, Math.abs(across) - zone.halfWidth);
+  const dist = Math.sqrt(distAlong * distAlong + distAcross * distAcross);
+
+  // Check if in apron zone
+  if (dist < zone.apronRadius) {
+    const t = smoothstep(0, zone.apronRadius, dist);
+    const blended = lerp(zone.targetElevation, naturalElevation, t);
+    return { elevation: blended, modified: true };
+  }
+
+  return { elevation: naturalElevation, modified: false };
+}
+
+/**
+ * Get elevation with flatten zone modifications applied
+ * @param {number} x
+ * @param {number} y
+ * @param {Array} flattenZones - Array of serialized flatten zones
+ * @returns {number} - Modified elevation
+ */
+function getModifiedElevation(x, y, flattenZones) {
+  const naturalElevation = getElevation(x, y);
+
+  if (!flattenZones || flattenZones.length === 0) {
+    return naturalElevation;
+  }
+
+  for (const zone of flattenZones) {
+    const result = checkFlattenZone(zone, x, y, naturalElevation);
+    if (result.modified) {
+      return result.elevation;
+    }
+  }
+
+  return naturalElevation;
+}
+
 /**
  * Handle messages from main thread
  */
@@ -51,10 +133,10 @@ function handleInit({ worldSeed }) {
  * Generate chunk data and return as transferable buffers
  */
 function handleGenerate(payload) {
-  const { requestId, chunkX, chunkY, chunkSize, gridSpacing, aoConfig } = payload;
+  const { requestId, chunkX, chunkY, chunkSize, gridSpacing, aoConfig, flattenZones } = payload;
 
   try {
-    const result = generateChunkData(chunkX, chunkY, chunkSize, gridSpacing, aoConfig);
+    const result = generateChunkData(chunkX, chunkY, chunkSize, gridSpacing, aoConfig, flattenZones || []);
 
     // Post result with transferable buffers for zero-copy
     self.postMessage({
@@ -86,8 +168,14 @@ function handleGenerate(payload) {
 /**
  * Generate terrain data for a chunk
  * Returns flat typed arrays ready for BufferGeometry
+ * @param {number} chunkX
+ * @param {number} chunkY
+ * @param {number} chunkSize
+ * @param {number} gridSpacing
+ * @param {Object} aoConfig
+ * @param {Array} flattenZones - Serialized flatten zones for airbases
  */
-function generateChunkData(chunkX, chunkY, chunkSize, gridSpacing, aoConfig) {
+function generateChunkData(chunkX, chunkY, chunkSize, gridSpacing, aoConfig, flattenZones) {
   const bounds = [
     chunkX * chunkSize,
     chunkY * chunkSize,
@@ -116,13 +204,14 @@ function generateChunkData(chunkX, chunkY, chunkSize, gridSpacing, aoConfig) {
   const numTriangles = triangleIndices.length / 3;
 
   // Pre-compute elevation and AO for all points
+  // Use modified elevation that accounts for airbase flatten zones
   const pointElevations = new Float32Array(points.length);
   const pointAO = new Float32Array(points.length);
 
   for (let i = 0; i < points.length; i++) {
     const [px, py] = points[i];
-    pointElevations[i] = getElevation(px, py);
-    pointAO[i] = computeVertexAO(px, py, pointElevations[i], aoConfig);
+    pointElevations[i] = getModifiedElevation(px, py, flattenZones);
+    pointAO[i] = computeVertexAO(px, py, pointElevations[i], aoConfig, flattenZones);
   }
 
   // Collect triangles whose centroid falls within chunk bounds
@@ -286,8 +375,13 @@ function computeFaceNormal(v0, v1, v2) {
 /**
  * Compute ambient occlusion factor for a vertex
  * Samples 8 surrounding points and determines how "enclosed" the vertex is
+ * @param {number} x
+ * @param {number} y
+ * @param {number} elevation
+ * @param {Object} aoConfig
+ * @param {Array} flattenZones - Flatten zones for modified elevation sampling
  */
-function computeVertexAO(x, y, elevation, aoConfig) {
+function computeVertexAO(x, y, elevation, aoConfig, flattenZones) {
   if (!aoConfig || !aoConfig.enabled) return 1.0;
 
   const { samplingRadius, maxHeight, strength } = aoConfig;
@@ -303,7 +397,8 @@ function computeVertexAO(x, y, elevation, aoConfig) {
   for (const [dx, dy] of directions) {
     const sampleX = x + dx * samplingRadius;
     const sampleY = y + dy * samplingRadius;
-    const sampleElev = getElevation(sampleX, sampleY);
+    // Use modified elevation to account for airbase flatten zones
+    const sampleElev = getModifiedElevation(sampleX, sampleY, flattenZones);
 
     // Height difference (positive = neighbor is higher = occluding)
     const heightDiff = sampleElev - elevation;

@@ -2,6 +2,8 @@
  * Player aircraft state and update logic
  */
 import * as THREE from 'three';
+import { LightingConfig, getLightDirection } from '../terrain/lighting.js';
+import { sampleTerrainElevation } from '../terrain/TerrainSampler.js';
 
 export class Aircraft {
   constructor(x = 0, y = 0) {
@@ -45,15 +47,20 @@ export class Aircraft {
     // Position aircraft close to camera so it stays large
     this.mesh.position.set(0, this.screenY, this.screenZ);
 
-    // Create shadow mesh (same geometry, dark tint)
+    // Create shadow mesh (same geometry, textured silhouette with black tint)
     const shadowMaterial = new THREE.MeshBasicMaterial({
-      color: 0x0a0a1a,
+      map: texture,           // Same F-16 texture as aircraft
+      color: 0x000000,        // Black tint (multiplies with texture for silhouette)
       transparent: true,
-      opacity: 0.5
+      opacity: 0.5,
+      depthWrite: false       // Don't write to depth buffer
     });
     this.shadowMesh = new THREE.Mesh(geometry.clone(), shadowMaterial);
-    // Shadow will be positioned relative to terrain Z in updateShadow()
+    // Shadow will be positioned based on light direction and terrain elevation
     this.shadowMesh.position.set(0, this.screenY, this.screenZ - 5);
+
+    // Store camera Z for perspective calculations (set externally)
+    this.cameraZ = 600;
   }
 
   getMesh() {
@@ -146,7 +153,7 @@ export class Aircraft {
 
     positions.needsUpdate = true;
 
-    // Update shadow: copy vertex deformation and apply altitude-based offset
+    // Update shadow: copy vertex deformation
     const shadowPositions = this.shadowMesh.geometry.attributes.position;
     shadowPositions.setY(0, halfSize + bankTilt + pitchTilt);
     shadowPositions.setY(1, halfSize - bankTilt + pitchTilt);
@@ -154,25 +161,67 @@ export class Aircraft {
     shadowPositions.setY(3, -halfSize - bankTilt - pitchTilt);
     shadowPositions.needsUpdate = true;
 
-    // Shadow offset based on altitude (sun from top-right, shadow toward bottom-left)
-    const maxOffset = 30;
-    const offsetRatio = Math.min(1, this.altitude / 40000);
-    const shadowOffsetX = -offsetRatio * maxOffset;
-    const shadowOffsetY = -offsetRatio * maxOffset;
+    // Compute shadow position based on light direction and terrain elevation
+    this.updateShadowPosition();
+  }
 
-    // Update shadow position
-    this.shadowMesh.position.x = this.mesh.position.x + shadowOffsetX;
-    this.shadowMesh.position.y = this.mesh.position.y + shadowOffsetY;
+  /**
+   * Compute shadow world position based on light direction and altitude
+   * Shadow is in the terrain group, so position is in world coordinates
+   */
+  updateShadowPosition() {
+    // Get light direction from current lighting config
+    const lightDir = getLightDirection(LightingConfig.azimuth, LightingConfig.elevation);
+
+    // Project shadow away from light source
+    // The shadow offset depends on altitude and sun elevation angle
+    // tan(elevation) = altitude / horizontal_distance
+    // horizontal_distance = altitude / tan(elevation)
+    // But we also want some minimum offset so shadow is visible
+    const elevationRad = LightingConfig.elevation * Math.PI / 180;
+    const tanElev = Math.tan(elevationRad);
+
+    // Calculate horizontal offset based on altitude and sun angle
+    // Higher sun (larger elevation) = shadow closer to aircraft
+    // Lower sun (smaller elevation) = shadow further from aircraft
+    // Clamp tanElev to avoid division issues at very low angles
+    const clampedTan = Math.max(0.2, tanElev);  // Minimum ~11 degree elevation
+    const horizontalOffset = this.altitude / clampedTan;
+
+    // Scale down to reasonable world units (altitude is in feet, want offset in world units)
+    // At 10000ft altitude with 45° sun, offset = 10000/1 = 10000, scale by 0.05 = 500 world units
+    const projectionScale = horizontalOffset * 0.05;
+
+    // Shadow world position (in terrain group coordinates)
+    // Light direction x,y components point FROM the sun, so shadow is opposite direction
+    const shadowWorldX = this.x - lightDir.x * projectionScale;
+    const shadowWorldY = this.y - lightDir.y * projectionScale;
+
+    // Sample terrain elevation at shadow position
+    // sampleTerrainElevation returns elevation scaled to match terrain mesh Z (scale 400)
+    const shadowZ = sampleTerrainElevation(shadowWorldX, shadowWorldY) + 5;  // +5 to sit above terrain surface
+
+    // Position shadow in world coordinates (terrain group handles rotation/translation)
+    this.shadowMesh.position.set(shadowWorldX, shadowWorldY, shadowZ);
+
+    // Rotate shadow to match aircraft heading
+    // The shadow mesh is in world space, so it needs to rotate with the aircraft
+    this.shadowMesh.rotation.z = -this.heading;  // Negative because terrain rotates opposite
+
+    // Dynamic opacity based on altitude (higher = fainter shadow)
+    const altRatio = Math.min(1, this.altitude / 40000);
+    const shadowOpacity = 0.5 * (1 - altRatio * 0.5);  // 0.5 at ground, 0.25 at ceiling
+    this.shadowMesh.material.opacity = shadowOpacity;
   }
 
   /**
    * Update shadow Z position to match terrain
-   * Shadow should appear on the terrain, which moves in Z with altitude
-   * @param {number} terrainZ - Current terrain Z position
+   * Called each frame to keep shadow on terrain surface
+   * @param {number} baseTerrainZ - Base terrain Z position (unused now, kept for API compat)
    */
-  updateShadowZ(terrainZ) {
-    // Shadow sits just above terrain
-    this.shadowMesh.position.z = terrainZ + 1;
+  updateShadowZ(baseTerrainZ) {
+    // Shadow Z is now computed in updateShadowPosition() using world coordinates
+    // This method is kept for API compatibility but no longer needed
   }
 
   /**
