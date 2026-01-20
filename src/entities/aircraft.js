@@ -25,11 +25,9 @@ export class Aircraft {
     this.pitchAngle = 0; // -1 to 1, smoothly interpolated (climb/dive)
 
     // Screen position - aircraft stays at fixed position, world moves around it
-    // With perspective camera at Z=600 and FOV=60:
-    // At Z=500 (100 units from camera), visible height is ~115 units
-    // Position aircraft 20% from bottom: -115/2 + 0.2*115 = -34
-    this.screenY = -100;   // 20% from bottom at Z=500
-    this.screenZ = 300;   // 100 units from camera (at Z=600)
+    // Aircraft at screen center (screenY = 0)
+    this.screenY = 0;
+    this.screenZ = 300;   // 300 units from camera (at Z=600)
 
     // Create sprite mesh
     const loader = new THREE.TextureLoader();

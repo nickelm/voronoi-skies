@@ -1,32 +1,29 @@
 /**
  * VoronoiCellManager - Orchestrates Voronoi cell rendering
- * Manages cells, computes tessellation, and coordinates multi-pass rendering
  *
- * Key principle: Write ALL masks to stencil first, THEN render all scenes
- * (Interleaving mask/scene per cell destroys previous stencil values)
+ * Uses ViewportManager for all rendering operations.
+ * Currently simplified: single cell = simple fullscreen render.
+ * Multi-cell stencil rendering will be added via ViewportManager.
  */
 
 import * as THREE from 'three';
 import { Delaunay } from 'd3-delaunay';
 import { VoronoiCell } from './VoronoiCell.js';
-import { StencilRenderer } from './StencilRenderer.js';
-import { CellBorderRenderer } from './CellBorderRenderer.js';
+import { ViewportManager } from '../viewport/ViewportManager.js';
 
 export class VoronoiCellManager {
   /**
    * @param {THREE.WebGLRenderer} renderer - The Three.js renderer
    * @param {THREE.Scene} scene - The main game scene
+   * @param {THREE.Camera} mainCamera - The main camera
    */
   constructor(renderer, scene, mainCamera) {
     this.renderer = renderer;
     this.scene = scene;
     this.mainCamera = mainCamera;
 
-    // Stencil mask handler
-    this.stencilRenderer = new StencilRenderer(renderer);
-
-    // Border renderer
-    this.borderRenderer = new CellBorderRenderer();
+    // Viewport manager handles all rendering
+    this.viewportManager = new ViewportManager(renderer);
 
     // Active cells
     this.cells = [];
@@ -43,34 +40,34 @@ export class VoronoiCellManager {
 
   /**
    * Initialize with player cell only
-   * Other cells (airbase, target) are added dynamically by controllers
    */
   initPlayerCell() {
-    // Player cell: seed at bottom-center of screen
     const playerCell = new VoronoiCell({
       id: 0,
       type: 'player'
     });
+    // Player seed at screen center
     playerCell.seed = {
       x: window.innerWidth / 2,
-      y: window.innerHeight * 0.7
+      y: window.innerHeight / 2
     };
 
     this.cells = [playerCell];
     this.computeVoronoi();
 
-    console.log('VoronoiCellManager: Initialized player cell');
+    console.log('VoronoiCellManager: Initialized player cell at screen center');
   }
 
   /**
    * Add a new cell dynamically
-   * @param {string} type - Cell type identifier ('airbase', 'target', etc.)
+   * @param {string} type - Cell type identifier ('target', 'ui', etc.)
    * @returns {VoronoiCell} The created cell
    */
   addCell(type) {
     const id = this.cells.length;
     const cell = new VoronoiCell({ id, type });
     this.cells.push(cell);
+    this.computeVoronoi();
     console.log(`VoronoiCellManager: Added ${type} cell (id=${id})`);
     return cell;
   }
@@ -83,7 +80,6 @@ export class VoronoiCellManager {
     const index = this.cells.indexOf(cell);
     if (index !== -1) {
       this.cells.splice(index, 1);
-      // Re-index remaining cells
       this.cells.forEach((c, i) => c.id = i);
       this.computeVoronoi();
       console.log(`VoronoiCellManager: Removed cell, ${this.cells.length} cells remaining`);
@@ -91,46 +87,11 @@ export class VoronoiCellManager {
   }
 
   /**
-   * Get player cell (always type 'player')
+   * Get player cell
    * @returns {VoronoiCell|null}
    */
   getPlayerCell() {
     return this.cells.find(c => c.type === 'player') || null;
-  }
-
-  /**
-   * @deprecated Use initPlayerCell() instead
-   * Initialize with two hardcoded test cells (kept for backwards compatibility)
-   */
-  initTestCells() {
-    // Player cell: seed at bottom-center of screen
-    const playerCell = new VoronoiCell({
-      id: 0,
-      type: 'player'
-    });
-    playerCell.seed = {
-      x: window.innerWidth / 2,
-      y: window.innerHeight * 0.7
-    };
-
-    // Target cell: seed at top-right area
-    const targetCell = new VoronoiCell({
-      id: 1,
-      type: 'target'
-    });
-    targetCell.seed = {
-      x: window.innerWidth / 2 + 150,
-      y: window.innerHeight * 0.3
-    };
-
-    this.cells = [playerCell, targetCell];
-    this.computeVoronoi();
-
-    // Debug: log cell info
-    console.log('VoronoiCellManager: Initialized test cells');
-    this.cells.forEach((cell, i) => {
-      console.log(`Cell ${i}: seed=(${cell.seed.x.toFixed(0)}, ${cell.seed.y.toFixed(0)}), aabb=(${cell.aabb.x}, ${cell.aabb.y}, ${cell.aabb.width}, ${cell.aabb.height})`);
-    });
   }
 
   /**
@@ -139,104 +100,123 @@ export class VoronoiCellManager {
   computeVoronoi() {
     if (this.cells.length === 0) return;
 
-    // Extract seed points as [x, y] array
     const points = this.cells.map(cell => [cell.seed.x, cell.seed.y]);
-
-    // Create Voronoi diagram using d3-delaunay
     const delaunay = Delaunay.from(points);
     this.voronoi = delaunay.voronoi(this.bounds);
 
-    // Update each cell with its polygon
     this.cells.forEach((cell, index) => {
       const polygon = this.voronoi.cellPolygon(index);
       cell.updatePolygon(polygon);
     });
-
-    // Update border geometry
-    this.borderRenderer.updateFromCells(this.cells);
   }
 
   /**
    * Update cell cameras based on main camera
-   * Player cell copies main camera; other cell types are managed externally
    */
   updateCameras() {
     if (!this.mainCamera) return;
 
     for (const cell of this.cells) {
       if (cell.type === 'player') {
-        // Player cell uses main camera exactly
         cell.updateCameraFromMain(this.mainCamera);
       }
-      // 'airbase' cells are managed by AirbaseCellController
-      // 'target' cells would be managed by a future TargetCellController
     }
   }
 
   /**
-   * Render all cells with stencil masking
+   * Render all cells
    *
-   * CRITICAL: Write ALL masks first, THEN render all scenes
-   * This follows the validated pattern from stencil-test.html
+   * Single cell: simple fullscreen render (no stencil needed)
+   * Multiple cells: use ViewportManager for stencil-masked rendering
    */
   render() {
+    // Clear all buffers
+    this.viewportManager.clearBuffers();
+
+    const playerCell = this.getPlayerCell();
+    if (!playerCell) return;
+
+    if (this.cells.length === 1) {
+      // Fast path: single cell, no stencil masking needed
+      this.renderer.render(this.scene, playerCell.camera);
+    } else {
+      // Multi-cell path: use stencil masking via ViewportManager
+      this._renderMultiCell();
+    }
+  }
+
+  /**
+   * Render multiple cells with stencil masking
+   * @private
+   */
+  _renderMultiCell() {
     const gl = this.renderer.getContext();
 
-    // 1. Clear ALL buffers once with explicit background color (#1a3a52)
-    gl.clearColor(0.102, 0.227, 0.322, 1);
-    this.renderer.clear(true, true, true);
+    // Separate cells by type
+    const playerCell = this.getPlayerCell();
+    const exclusiveCells = this.cells.filter(c => c.type !== 'player');
 
-    // 2. Write ALL masks to stencil buffer FIRST
-    const cellData = [];
-    for (let i = 0; i < this.cells.length; i++) {
-      const cell = this.cells[i];
-      if (!cell.polygon) continue;
+    // 1. Write ALL stencil masks first
+    // Player/on-screen cells get ref=1
+    if (playerCell && playerCell.polygon) {
+      this.viewportManager.writeMask(playerCell.polygon, 1);
+    }
 
-      const stencilRef = i + 1;  // ref 0 means "no cell"
-      const maskMesh = this.stencilRenderer.createPolygonMesh(cell.polygon, stencilRef);
-      if (maskMesh) {
-        this.stencilRenderer.writeMaskToStencil(maskMesh, stencilRef);
-        cellData.push({ mesh: maskMesh, ref: stencilRef, cell });
+    // Exclusive cells get ref=2, 3, 4...
+    for (let i = 0; i < exclusiveCells.length; i++) {
+      const cell = exclusiveCells[i];
+      if (cell.polygon) {
+        this.viewportManager.writeMask(cell.polygon, i + 2);
       }
     }
 
-    // 3. Render scene for EACH cell where stencil matches its ref value
-    for (const { mesh, ref, cell } of cellData) {
-      // Clear depth only (preserve color and stencil)
-      this.renderer.clearDepth();
-
-      // Configure stencil test: only render where stencil == ref
-      gl.enable(gl.STENCIL_TEST);
-      gl.stencilFunc(gl.EQUAL, ref, 0xFF);
-      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
-      gl.stencilMask(0x00);  // Don't modify stencil during scene render
-
-      // Render scene with cell's camera
-      this.renderer.render(this.scene, cell.camera);
-
-      gl.disable(gl.STENCIL_TEST);
-
-      // Dispose mask mesh (created fresh each frame)
-      mesh.geometry.dispose();
-      mesh.material.dispose();
+    // 2. Render player cell (ref=1)
+    if (playerCell) {
+      this._renderCellWithStencil(playerCell, 1);
     }
 
-    // 4. Render borders on top (no stencil test)
-    this.borderRenderer.render(this.renderer);
+    // 3. Render exclusive cells
+    for (let i = 0; i < exclusiveCells.length; i++) {
+      const cell = exclusiveCells[i];
+      this._renderCellWithStencil(cell, i + 2);
+    }
+  }
+
+  /**
+   * Render a single cell where stencil matches refValue
+   * @private
+   */
+  _renderCellWithStencil(cell, refValue) {
+    const gl = this.renderer.getContext();
+
+    // Clear depth between cells
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+
+    // Configure stencil test
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    gl.stencilMask(0x00);
+
+    // Render with cell's camera
+    this.renderer.render(this.scene, cell.camera);
+
+    gl.disable(gl.STENCIL_TEST);
   }
 
   /**
    * Handle window resize
    */
   onResize() {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
+    this.bounds = [0, 0, window.innerWidth, window.innerHeight];
 
-    this.bounds = [0, 0, width, height];
-    this.stencilRenderer.onResize(width, height);
-    this.borderRenderer.onResize(width, height);
+    // Update player seed to new center
+    const playerCell = this.getPlayerCell();
+    if (playerCell) {
+      playerCell.seed.x = window.innerWidth / 2;
+      playerCell.seed.y = window.innerHeight / 2;
+    }
 
-    // Recompute Voronoi with new bounds
     this.computeVoronoi();
   }
 
@@ -244,7 +224,6 @@ export class VoronoiCellManager {
    * Clean up resources
    */
   dispose() {
-    this.stencilRenderer.dispose();
-    this.borderRenderer.dispose();
+    this.viewportManager.dispose();
   }
 }

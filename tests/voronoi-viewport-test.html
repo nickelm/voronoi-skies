@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Voronoi Split-Screen Test v30 - Fixed 2D UI Cells</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+    canvas { display: block; }
+    #info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      font-family: monospace;
+      font-size: 12px;
+      background: rgba(0,0,0,0.7);
+      padding: 10px;
+      border-radius: 4px;
+      z-index: 100;
+      line-height: 1.6;
+    }
+    #info kbd {
+      background: #444;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <strong>Voronoi Split-Screen v30</strong><br>
+    <kbd>A</kbd>/<kbd>D</kbd> Rotate player heading<br>
+    <kbd>←→</kbd> Move selected target bearing<br>
+    <kbd>↑↓</kbd> Move selected target range<br>
+    <kbd>W</kbd>/<kbd>S</kbd> Adjust target zoom (altitude)<br>
+    <kbd>Tab</kbd> Cycle selected target<br>
+    <kbd>R</kbd> Toggle auto-rotation<br>
+    <kbd>B</kbd> Toggle debug overlay<br>
+    <kbd>U</kbd> Toggle UI cells (instruments)<br>
+    <hr style="border-color:#444">
+    <span id="status">Initializing...</span>
+  </div>
+
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/d3-delaunay@6.0.4/dist/d3-delaunay.min.js"></script>
+
+  <script>
+    // === CONFIGURATION ===
+    const SCREEN_INSET = 30;
+    const VISIBILITY_MARGIN = 50;
+    const BLEND_MARGIN = 100;
+    const SAFE_RECT_RATIO = 0.80;
+    
+    const PLAYER_CAM_HEIGHT = 80;
+    
+    // === STATE ===
+    let playerHeading = 0;
+    let playerRotating = false;
+    let showDebug = true;
+    
+    const targets = [
+      { id: 'alpha', bearing: 30, range: 18000, color: 0x4488ff, name: 'Alpha', camAltitude: 60 },
+      { id: 'bravo', bearing: 150, range: 25000, color: 0x44ff44, name: 'Bravo', camAltitude: 40 },
+      { id: 'charlie', bearing: 250, range: 22000, color: 0xff44ff, name: 'Charlie', camAltitude: 100 }
+    ];
+    
+    const uiCells = [
+      { id: 'altimeter', position: 'bottom-right', label: '🛫 ALT', enabled: true },
+      { id: 'compass', position: 'top-right', label: '🧭 HDG', enabled: true }
+    ];
+    let selectedTargetIndex = 0;
+    
+    // === THREE.JS GLOBALS ===
+    let renderer, gl;
+    let screenW, screenH;
+    let scene, maskScene;
+    let playerCamera;
+    let targetCameras = {};
+    let maskCamera;
+    let overlayCanvas, overlayCtx;
+    let voronoiCells = [];
+
+    // 2D UI cell scenes and cameras
+    const uiScenes = {};
+    const uiCameras = {};
+
+    // Fixed size for UI instruments (in pixels)
+    const UI_CELL_SIZE = 120;
+
+    // === INITIALIZATION ===
+    function init() {
+      screenW = window.innerWidth;
+      screenH = window.innerHeight;
+      
+      renderer = new THREE.WebGLRenderer({ antialias: false, stencil: true });
+      renderer.autoClear = false;
+      renderer.setSize(screenW, screenH);
+      document.body.appendChild(renderer.domElement);
+      
+      gl = renderer.getContext();
+      console.log('Stencil bits:', gl.getParameter(gl.STENCIL_BITS));
+      
+      overlayCanvas = document.createElement('canvas');
+      overlayCanvas.width = screenW;
+      overlayCanvas.height = screenH;
+      overlayCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;';
+      document.body.appendChild(overlayCanvas);
+      overlayCtx = overlayCanvas.getContext('2d');
+      
+      // Main 3D scene - NO background (we clear manually)
+      scene = new THREE.Scene();
+      
+      const gridHelper = new THREE.GridHelper(200, 40, 0x444444, 0x333333);
+      scene.add(gridHelper);
+      
+      const playerMarker = new THREE.Group();
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(2, 5, 8),
+        new THREE.MeshBasicMaterial({ color: 0xff4444 })
+      );
+      cone.rotation.x = -Math.PI / 2;
+      playerMarker.add(cone);
+      playerMarker.position.set(0, 0.5, 0);
+      playerMarker.name = 'playerMarker';
+      scene.add(playerMarker);
+      
+      for (const target of targets) {
+        const marker = new THREE.Mesh(
+          new THREE.BoxGeometry(4, 4, 4),
+          new THREE.MeshBasicMaterial({ color: target.color })
+        );
+        marker.name = 'marker-' + target.id;
+        scene.add(marker);
+        
+        targetCameras[target.id] = new THREE.PerspectiveCamera(60, screenW / screenH, 1, 10000);
+      }
+      
+      addLandmark(20, 0, -30, 0x666644, 'NE');
+      addLandmark(-20, 0, -30, 0x666644, 'NW');
+      addLandmark(0, 0, 30, 0x666644, 'S');
+      addLandmark(40, 0, 0, 0x666644, 'E');
+      addLandmark(-40, 0, 0, 0x666644, 'W');
+      
+      playerCamera = new THREE.PerspectiveCamera(60, screenW / screenH, 1, 10000);
+      
+      maskScene = new THREE.Scene();
+      maskCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      
+      setupUiCells();
+      
+      window.addEventListener('resize', onResize);
+      window.addEventListener('keydown', onKeyDown);
+      
+      animate();
+    }
+    
+    function setupUiCells() {
+      for (const cell of uiCells) {
+        // Orthographic camera - full screen, we adjust frustum at render time
+        const cam = new THREE.OrthographicCamera(
+          -screenW/2, screenW/2,
+          screenH/2, -screenH/2,
+          0.1, 100
+        );
+        cam.position.z = 10;
+        uiCameras[cell.id] = cam;
+        
+        const uiScene = new THREE.Scene();
+        // NO scene.background - causes issues with stencil
+        
+        // Background quad
+        const bgQuad = new THREE.Mesh(
+          new THREE.PlaneGeometry(UI_CELL_SIZE * 3, UI_CELL_SIZE * 3),
+          new THREE.MeshBasicMaterial({ color: 0x1a1a2a })
+        );
+        bgQuad.position.z = -5;
+        uiScene.add(bgQuad);
+        
+        if (cell.id === 'altimeter') {
+          createAltimeterContent(uiScene, UI_CELL_SIZE);
+        } else if (cell.id === 'compass') {
+          createCompassContent(uiScene, UI_CELL_SIZE);
+        }
+        
+        uiScenes[cell.id] = uiScene;
+      }
+    }
+    
+    function createAltimeterContent(uiScene, size) {
+      const radius = size * 0.42;
+      const bezelWidth = size * 0.05;
+      
+      // Outer bezel ring
+      const bezel = new THREE.Mesh(
+        new THREE.RingGeometry(radius, radius + bezelWidth, 64),
+        new THREE.MeshBasicMaterial({ color: 0x444466, side: THREE.DoubleSide })
+      );
+      uiScene.add(bezel);
+      
+      // Main dial face
+      const dialFace = new THREE.Mesh(
+        new THREE.CircleGeometry(radius, 64),
+        new THREE.MeshBasicMaterial({ color: 0x111122 })
+      );
+      uiScene.add(dialFace);
+      
+      // Create tick marks using canvas
+      const canvasSize = 256;
+      const dialCanvas = document.createElement('canvas');
+      dialCanvas.width = canvasSize;
+      dialCanvas.height = canvasSize;
+      const ctx = dialCanvas.getContext('2d');
+      
+      const cx = canvasSize / 2, cy = canvasSize / 2;
+      const tickRadius = canvasSize * 0.45;
+      
+      for (let i = 0; i < 50; i++) {
+        const angle = (i / 50) * Math.PI * 2 - Math.PI / 2;
+        const isMajor = i % 5 === 0;
+        const innerR = isMajor ? tickRadius - 20 : tickRadius - 10;
+        const outerR = tickRadius;
+        
+        ctx.strokeStyle = isMajor ? '#88ff88' : '#446644';
+        ctx.lineWidth = isMajor ? 3 : 1;
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(angle) * innerR, cy + Math.sin(angle) * innerR);
+        ctx.lineTo(cx + Math.cos(angle) * outerR, cy + Math.sin(angle) * outerR);
+        ctx.stroke();
+      }
+      
+      ctx.fillStyle = '#88ff88';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < 10; i++) {
+        const angle = (i / 10) * Math.PI * 2 - Math.PI / 2;
+        const numR = tickRadius - 35;
+        ctx.fillText(i.toString(), cx + Math.cos(angle) * numR, cy + Math.sin(angle) * numR);
+      }
+      
+      const dialTexture = new THREE.CanvasTexture(dialCanvas);
+      const dialOverlay = new THREE.Mesh(
+        new THREE.CircleGeometry(radius, 64),
+        new THREE.MeshBasicMaterial({ map: dialTexture, transparent: true })
+      );
+      dialOverlay.position.z = 0.1;
+      uiScene.add(dialOverlay);
+      
+      // Needle
+      const needleShape = new THREE.Shape();
+      needleShape.moveTo(0, radius * 0.9);
+      needleShape.lineTo(-3, 0);
+      needleShape.lineTo(0, -10);
+      needleShape.lineTo(3, 0);
+      needleShape.lineTo(0, radius * 0.9);
+      
+      const needleGeo = new THREE.ShapeGeometry(needleShape);
+      const needle = new THREE.Mesh(
+        needleGeo,
+        new THREE.MeshBasicMaterial({ color: 0xff8844, side: THREE.DoubleSide })
+      );
+      needle.position.z = 0.2;
+      needle.name = 'altNeedle';
+      uiScene.add(needle);
+      
+      // Center cap
+      const cap = new THREE.Mesh(
+        new THREE.CircleGeometry(8, 32),
+        new THREE.MeshBasicMaterial({ color: 0x666688 })
+      );
+      cap.position.z = 0.3;
+      uiScene.add(cap);
+    }
+    
+    function createCompassContent(uiScene, size) {
+      const radius = size * 0.42;
+      const bezelWidth = size * 0.05;
+      
+      // Outer bezel ring
+      const bezel = new THREE.Mesh(
+        new THREE.RingGeometry(radius, radius + bezelWidth, 64),
+        new THREE.MeshBasicMaterial({ color: 0x664444, side: THREE.DoubleSide })
+      );
+      uiScene.add(bezel);
+      
+      // Main dial face
+      const dialFace = new THREE.Mesh(
+        new THREE.CircleGeometry(radius, 64),
+        new THREE.MeshBasicMaterial({ color: 0x111111 })
+      );
+      uiScene.add(dialFace);
+      
+      // Create compass card using canvas
+      const canvasSize = 256;
+      const compassCanvas = document.createElement('canvas');
+      compassCanvas.width = canvasSize;
+      compassCanvas.height = canvasSize;
+      const ctx = compassCanvas.getContext('2d');
+      
+      const ccx = canvasSize / 2, ccy = canvasSize / 2;
+      const tickRadius = canvasSize * 0.45;
+      
+      for (let i = 0; i < 36; i++) {
+        const angle = (i / 36) * Math.PI * 2 - Math.PI / 2;
+        const isMajor = i % 3 === 0;
+        const innerR = isMajor ? tickRadius - 20 : tickRadius - 10;
+        const outerR = tickRadius;
+        
+        ctx.strokeStyle = isMajor ? '#ffaa44' : '#664422';
+        ctx.lineWidth = isMajor ? 3 : 1;
+        ctx.beginPath();
+        ctx.moveTo(ccx + Math.cos(angle) * innerR, ccy + Math.sin(angle) * innerR);
+        ctx.lineTo(ccx + Math.cos(angle) * outerR, ccy + Math.sin(angle) * outerR);
+        ctx.stroke();
+      }
+      
+      const cardinals = ['N', 'E', 'S', 'W'];
+      ctx.fillStyle = '#ffaa44';
+      ctx.font = 'bold 28px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < 4; i++) {
+        const angle = (i / 4) * Math.PI * 2 - Math.PI / 2;
+        const numR = tickRadius - 35;
+        ctx.fillText(cardinals[i], ccx + Math.cos(angle) * numR, ccy + Math.sin(angle) * numR);
+      }
+      
+      const compassTexture = new THREE.CanvasTexture(compassCanvas);
+      const compassRose = new THREE.Mesh(
+        new THREE.CircleGeometry(radius, 64),
+        new THREE.MeshBasicMaterial({ map: compassTexture, transparent: true })
+      );
+      compassRose.position.z = 0.1;
+      compassRose.name = 'compassRose';
+      uiScene.add(compassRose);
+      
+      // Lubber line
+      const lubberGeo = new THREE.BufferGeometry();
+      lubberGeo.setAttribute('position', new THREE.Float32BufferAttribute([
+        0, radius + bezelWidth + 5, 0.2,
+        -5, radius - 5, 0.2,
+        5, radius - 5, 0.2
+      ], 3));
+      lubberGeo.setIndex([0, 1, 2]);
+      const lubber = new THREE.Mesh(
+        lubberGeo,
+        new THREE.MeshBasicMaterial({ color: 0xff4444, side: THREE.DoubleSide })
+      );
+      uiScene.add(lubber);
+      
+      // Center cap
+      const cap = new THREE.Mesh(
+        new THREE.CircleGeometry(6, 32),
+        new THREE.MeshBasicMaterial({ color: 0x666666 })
+      );
+      cap.position.z = 0.3;
+      uiScene.add(cap);
+      
+      // Digital readout
+      const readoutCanvas = document.createElement('canvas');
+      readoutCanvas.width = 64;
+      readoutCanvas.height = 32;
+      const rctx = readoutCanvas.getContext('2d');
+      rctx.fillStyle = '#000000';
+      rctx.fillRect(0, 0, 64, 32);
+      
+      const readoutTexture = new THREE.CanvasTexture(readoutCanvas);
+      readoutTexture.minFilter = THREE.LinearFilter;
+      
+      const readoutBox = new THREE.Mesh(
+        new THREE.PlaneGeometry(size * 0.3, size * 0.15),
+        new THREE.MeshBasicMaterial({ map: readoutTexture })
+      );
+      readoutBox.position.y = -radius * 0.55;
+      readoutBox.position.z = 0.2;
+      readoutBox.name = 'hdgReadout';
+      uiScene.add(readoutBox);
+      
+      readoutBox.userData.canvas = readoutCanvas;
+      readoutBox.userData.ctx = rctx;
+    }
+    
+    function updateUiCells() {
+      const simAltitude = 5000 + Math.sin(Date.now() / 3000) * 4000;
+      
+      const altScene = uiScenes['altimeter'];
+      if (altScene) {
+        const needle = altScene.getObjectByName('altNeedle');
+        if (needle) {
+          const altFraction = (simAltitude % 10000) / 10000;
+          needle.rotation.z = -altFraction * Math.PI * 2;
+        }
+      }
+      
+      const compassScene = uiScenes['compass'];
+      if (compassScene) {
+        const rose = compassScene.getObjectByName('compassRose');
+        if (rose) {
+          rose.rotation.z = playerHeading * Math.PI / 180;
+        }
+        
+        const readout = compassScene.getObjectByName('hdgReadout');
+        if (readout && readout.userData.ctx) {
+          const ctx = readout.userData.ctx;
+          const canvas = readout.userData.canvas;
+          
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(0, 0, 64, 32);
+          ctx.strokeStyle = '#ffaa00';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(1, 1, 62, 30);
+          
+          ctx.fillStyle = '#ffaa00';
+          ctx.font = 'bold 18px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(Math.round(playerHeading).toString().padStart(3, '0') + '°', 32, 16);
+          
+          readout.material.map.needsUpdate = true;
+        }
+      }
+    }
+    
+    function addLandmark(x, y, z, color, label) {
+      const mesh = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.5, 1.5, 8, 8),
+        new THREE.MeshBasicMaterial({ color })
+      );
+      mesh.position.set(x, 4, z);
+      mesh.name = label;
+      scene.add(mesh);
+    }
+
+    // === WORLD POSITION AND PROJECTION ===
+    
+    function getTargetWorldPosition(target) {
+      const bearingRad = target.bearing * Math.PI / 180;
+      const sceneRange = target.range / 500;
+      return {
+        x: Math.sin(bearingRad) * sceneRange,
+        z: -Math.cos(bearingRad) * sceneRange
+      };
+    }
+    
+    function projectToScreen(worldX, worldZ) {
+      const headingRad = playerHeading * Math.PI / 180;
+      const rotatedX = worldX * Math.cos(headingRad) + worldZ * Math.sin(headingRad);
+      const rotatedZ = -worldX * Math.sin(headingRad) + worldZ * Math.cos(headingRad);
+      
+      const point = new THREE.Vector3(rotatedX, 0, rotatedZ);
+      const projected = point.project(playerCamera);
+      
+      const screenX = (projected.x + 1) / 2 * screenW;
+      const screenY = (1 - projected.y) / 2 * screenH;
+      
+      const visible = screenX >= VISIBILITY_MARGIN && 
+                      screenX <= screenW - VISIBILITY_MARGIN &&
+                      screenY >= VISIBILITY_MARGIN && 
+                      screenY <= screenH - VISIBILITY_MARGIN &&
+                      projected.z < 1;
+      
+      return { x: screenX, y: screenY, visible };
+    }
+    
+    function rayToScreenEdge(targetX, targetY) {
+      const cx = screenW / 2;
+      const cy = screenH / 2;
+      const dx = targetX - cx;
+      const dy = targetY - cy;
+      
+      if (dx === 0 && dy === 0) return { x: cx, y: 0 };
+      
+      let tMin = Infinity;
+      let hit = null;
+      
+      if (dx < 0) {
+        const t = -cx / dx;
+        const y = cy + t * dy;
+        if (y >= 0 && y <= screenH && t < tMin) { tMin = t; hit = { x: 0, y }; }
+      }
+      if (dx > 0) {
+        const t = (screenW - cx) / dx;
+        const y = cy + t * dy;
+        if (y >= 0 && y <= screenH && t < tMin) { tMin = t; hit = { x: screenW, y }; }
+      }
+      if (dy < 0) {
+        const t = -cy / dy;
+        const x = cx + t * dx;
+        if (x >= 0 && x <= screenW && t < tMin) { tMin = t; hit = { x, y: 0 }; }
+      }
+      if (dy > 0) {
+        const t = (screenH - cy) / dy;
+        const x = cx + t * dx;
+        if (x >= 0 && x <= screenW && t < tMin) { tMin = t; hit = { x, y: screenH }; }
+      }
+      
+      return hit || { x: cx, y: 0 };
+    }
+
+    // === VORONOI COMPUTATION ===
+    
+    function deconflictSeeds(vertices) {
+      const MIN_SEED_DISTANCE = 40;
+      const cx = screenW / 2;
+      const cy = screenH / 2;
+      
+      const offScreenSeeds = vertices.filter(v => v.type === 'target' && !v.onScreen);
+      
+      for (const seed of offScreenSeeds) {
+        seed.targetIndex = targets.findIndex(t => t.id === seed.target.id);
+      }
+      
+      for (const seed of offScreenSeeds) {
+        for (const other of offScreenSeeds) {
+          if (seed === other) continue;
+          
+          const dist = Math.hypot(seed.x - other.x, seed.y - other.y);
+          if (dist < MIN_SEED_DISTANCE) {
+            const edgeDx = seed.x - cx;
+            const edgeDy = seed.y - cy;
+            const edgeLen = Math.hypot(edgeDx, edgeDy);
+            const tangentX = -edgeDy / edgeLen;
+            const tangentY = edgeDx / edgeLen;
+            
+            const offset = (MIN_SEED_DISTANCE - dist) / 2 + 5;
+            const sign = seed.targetIndex < other.targetIndex ? 1 : -1;
+            seed.x += tangentX * offset * sign;
+            seed.y += tangentY * offset * sign;
+          }
+        }
+        
+        if (seed.x < 5 || seed.x > screenW - 5 || seed.y < 5 || seed.y > screenH - 5) {
+          const margin = 5;
+          seed.x = Math.max(margin, Math.min(screenW - margin, seed.x));
+          seed.y = Math.max(margin, Math.min(screenH - margin, seed.y));
+        }
+      }
+      
+      return vertices;
+    }
+    
+    function computeVoronoiVertices() {
+      const vertices = [];
+      
+      vertices.push({
+        id: 'player',
+        x: screenW / 2,
+        y: screenH / 2,
+        type: 'player',
+        onScreen: true
+      });
+      
+      for (const target of targets) {
+        const worldPos = getTargetWorldPosition(target);
+        const projected = projectToScreen(worldPos.x, worldPos.z);
+        
+        let seedX, seedY;
+        const onScreen = projected.visible;
+        
+        if (onScreen) {
+          seedX = projected.x;
+          seedY = projected.y;
+        } else {
+          const edge = rayToScreenEdge(projected.x, projected.y);
+          const dx = edge.x - screenW / 2;
+          const dy = edge.y - screenH / 2;
+          const len = Math.hypot(dx, dy);
+          seedX = edge.x - (dx / len) * SCREEN_INSET;
+          seedY = edge.y - (dy / len) * SCREEN_INSET;
+        }
+        
+        vertices.push({
+          id: target.id,
+          x: seedX,
+          y: seedY,
+          type: 'target',
+          worldX: worldPos.x,
+          worldZ: worldPos.z,
+          target: target,
+          onScreen: onScreen
+        });
+      }
+      
+      const safeMarginX = screenW * (1 - SAFE_RECT_RATIO) / 2;
+      const safeMarginY = screenH * (1 - SAFE_RECT_RATIO) / 2;
+      
+      for (const uiCell of uiCells) {
+        if (!uiCell.enabled) continue;
+        
+        let seedX, seedY;
+        switch (uiCell.position) {
+          case 'top-left':
+            seedX = safeMarginX;
+            seedY = safeMarginY;
+            break;
+          case 'top-right':
+            seedX = screenW - safeMarginX;
+            seedY = safeMarginY;
+            break;
+          case 'bottom-left':
+            seedX = safeMarginX;
+            seedY = screenH - safeMarginY;
+            break;
+          case 'bottom-right':
+            seedX = screenW - safeMarginX;
+            seedY = screenH - safeMarginY;
+            break;
+          default:
+            seedX = screenW / 2;
+            seedY = screenH / 2;
+        }
+        
+        vertices.push({
+          id: uiCell.id,
+          x: seedX,
+          y: seedY,
+          type: 'ui',
+          uiCell: uiCell,
+          onScreen: false
+        });
+      }
+      
+      return deconflictSeeds(vertices);
+    }
+    
+    function computeVoronoiCells(vertices) {
+      if (vertices.length === 1) {
+        return [{
+          ...vertices[0],
+          polygon: [[0, 0], [screenW, 0], [screenW, screenH], [0, screenH], [0, 0]],
+          neighbors: []
+        }];
+      }
+      
+      const points = vertices.map(v => [v.x, v.y]);
+      const delaunay = d3.Delaunay.from(points);
+      const voronoi = delaunay.voronoi([0, 0, screenW, screenH]);
+      
+      return vertices.map((v, i) => ({
+        ...v,
+        index: i,
+        polygon: voronoi.cellPolygon(i),
+        neighbors: [...delaunay.neighbors(i)]
+      }));
+    }
+
+    // === CAMERA SETUP ===
+    
+    function updatePlayerCamera() {
+      playerCamera.position.set(0, PLAYER_CAM_HEIGHT, 0);
+      playerCamera.up.set(0, 0, -1);
+      playerCamera.lookAt(0, 0, 0);
+      playerCamera.aspect = screenW / screenH;
+      playerCamera.updateProjectionMatrix();
+      
+      const marker = scene.getObjectByName('playerMarker');
+      if (marker) marker.rotation.y = -playerHeading * Math.PI / 180;
+    }
+    
+    function smoothstep(edge0, edge1, x) {
+      const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+      return t * t * (3 - 2 * t);
+    }
+    
+    function getBlendedAltitude(target, projectedX, projectedY) {
+      const distToLeft = projectedX;
+      const distToRight = screenW - projectedX;
+      const distToTop = projectedY;
+      const distToBottom = screenH - projectedY;
+      const minDistToEdge = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+      
+      if (minDistToEdge > VISIBILITY_MARGIN) {
+        return PLAYER_CAM_HEIGHT;
+      }
+      
+      if (minDistToEdge < -BLEND_MARGIN) {
+        return target.camAltitude;
+      }
+      
+      const t = smoothstep(-BLEND_MARGIN, VISIBILITY_MARGIN, minDistToEdge);
+      return target.camAltitude + t * (PLAYER_CAM_HEIGHT - target.camAltitude);
+    }
+    
+    function updateTargetCamera(targetId, worldX, worldZ, blendedAltitude) {
+      const camera = targetCameras[targetId];
+      if (!camera) return;
+      
+      const headingRad = playerHeading * Math.PI / 180;
+      const rotX = worldX * Math.cos(headingRad) + worldZ * Math.sin(headingRad);
+      const rotZ = -worldX * Math.sin(headingRad) + worldZ * Math.cos(headingRad);
+      
+      camera.position.set(rotX, blendedAltitude, rotZ);
+      camera.up.set(0, 0, -1);
+      camera.lookAt(rotX, 0, rotZ);
+      camera.aspect = screenW / screenH;
+      camera.updateProjectionMatrix();
+    }
+    
+    function updateTargetMarkers() {
+      for (const target of targets) {
+        const marker = scene.getObjectByName('marker-' + target.id);
+        if (marker) {
+          const pos = getTargetWorldPosition(target);
+          marker.position.set(pos.x, 2, pos.z);
+        }
+      }
+    }
+    
+    function updateSceneRotation() {
+      scene.rotation.y = playerHeading * Math.PI / 180;
+    }
+
+    // === STENCIL RENDERING (RAW WebGL) ===
+    
+    function createMaskMesh(polygon) {
+      if (!polygon || polygon.length < 3) {
+        return null;
+      }
+      
+      const ndc = polygon.map(([x, y]) => [
+        (x / screenW) * 2 - 1,
+        1 - (y / screenH) * 2
+      ]);
+      
+      const positions = [];
+      for (let i = 1; i < ndc.length - 1; i++) {
+        positions.push(ndc[0][0], ndc[0][1], 0);
+        positions.push(ndc[i][0], ndc[i][1], 0);
+        positions.push(ndc[i + 1][0], ndc[i + 1][1], 0);
+      }
+      
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      
+      // Simple material - stencil ops done via raw GL
+      const mat = new THREE.MeshBasicMaterial({
+        colorWrite: false,
+        depthWrite: false,
+        depthTest: false,
+        side: THREE.DoubleSide
+      });
+      
+      return new THREE.Mesh(geo, mat);
+    }
+    
+    /**
+     * Write a stencil mask using RAW WebGL calls
+     */
+    function writeMask(polygon, refValue) {
+      const mask = createMaskMesh(polygon);
+      if (!mask) return;
+      
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.ALWAYS, refValue, 0xFF);
+      gl.stencilOp(gl.REPLACE, gl.REPLACE, gl.REPLACE);
+      gl.stencilMask(0xFF);
+      
+      maskScene.add(mask);
+      renderer.render(maskScene, maskCamera);
+      maskScene.remove(mask);
+      
+      gl.disable(gl.STENCIL_TEST);
+      
+      mask.geometry.dispose();
+      mask.material.dispose();
+    }
+    
+    /**
+     * Render a 3D cell with stencil test
+     */
+    function renderCell(camera, refValue, cell, targetScene) {
+      if (!cell || !cell.polygon) return;
+      
+      const vpX = cell.x - screenW / 2;
+      const vpY = (screenH - cell.y) - screenH / 2;
+      
+      renderer.setViewport(vpX, vpY, screenW, screenH);
+      
+      camera.aspect = screenW / screenH;
+      camera.updateProjectionMatrix();
+      
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+      gl.stencilMask(0x00);
+      
+      renderer.render(targetScene, camera);
+      
+      gl.disable(gl.STENCIL_TEST);
+      
+      renderer.setViewport(0, 0, screenW, screenH);
+    }
+    
+    /**
+     * Render a 2D UI cell with stencil test
+     */
+    function renderUiCell(camera, refValue, cell, targetScene) {
+      if (!cell || !cell.polygon) return;
+      
+      // Adjust ortho camera frustum so origin maps to seed position
+      camera.left = -cell.x;
+      camera.right = screenW - cell.x;
+      camera.top = cell.y;
+      camera.bottom = cell.y - screenH;
+      camera.updateProjectionMatrix();
+      
+      renderer.setViewport(0, 0, screenW, screenH);
+      
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      
+      gl.enable(gl.STENCIL_TEST);
+      gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
+      gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+      gl.stencilMask(0x00);
+      
+      renderer.render(targetScene, camera);
+      
+      gl.disable(gl.STENCIL_TEST);
+    }
+
+    // === OVERLAY DRAWING ===
+    
+    function drawBoxedLabel(text, x, y, bgColor = 'rgba(0,0,0,0.7)', textColor = '#ffffff') {
+      overlayCtx.font = 'bold 11px monospace';
+      const metrics = overlayCtx.measureText(text);
+      const padding = 4;
+      const boxW = metrics.width + padding * 2;
+      const boxH = 14 + padding * 2;
+      
+      overlayCtx.fillStyle = bgColor;
+      overlayCtx.fillRect(x - boxW / 2, y - boxH / 2, boxW, boxH);
+      
+      overlayCtx.strokeStyle = textColor;
+      overlayCtx.lineWidth = 1;
+      overlayCtx.strokeRect(x - boxW / 2, y - boxH / 2, boxW, boxH);
+      
+      overlayCtx.fillStyle = textColor;
+      overlayCtx.textAlign = 'center';
+      overlayCtx.textBaseline = 'middle';
+      overlayCtx.fillText(text, x, y);
+    }
+    
+    /**
+     * Check if a line segment lies on the screen edge
+     */
+    function isOnScreenEdge(x1, y1, x2, y2) {
+      const threshold = 2;
+      // Left edge
+      if (Math.abs(x1) < threshold && Math.abs(x2) < threshold) return true;
+      // Right edge
+      if (Math.abs(x1 - screenW) < threshold && Math.abs(x2 - screenW) < threshold) return true;
+      // Top edge
+      if (Math.abs(y1) < threshold && Math.abs(y2) < threshold) return true;
+      // Bottom edge
+      if (Math.abs(y1 - screenH) < threshold && Math.abs(y2 - screenH) < threshold) return true;
+      return false;
+    }
+    
+    function drawOverlay(cells, offScreenTargetCells, uiCellsList) {
+      overlayCtx.clearRect(0, 0, screenW, screenH);
+      
+      const allExclusiveCells = [...(offScreenTargetCells || []), ...(uiCellsList || [])];
+      
+      // Draw borders only for exclusive cells (not on-screen merged cells)
+      // Skip segments that lie on screen edges
+      if (allExclusiveCells.length > 0) {
+        overlayCtx.strokeStyle = '#ffffff';
+        overlayCtx.lineWidth = 2;
+        
+        for (const cell of allExclusiveCells) {
+          const poly = cell.polygon;
+          if (!poly || poly.length < 3) continue;
+          
+          // Draw each segment individually, skipping screen-edge segments
+          for (let i = 0; i < poly.length - 1; i++) {
+            const x1 = poly[i][0], y1 = poly[i][1];
+            const x2 = poly[i + 1][0], y2 = poly[i + 1][1];
+            
+            if (!isOnScreenEdge(x1, y1, x2, y2)) {
+              overlayCtx.beginPath();
+              overlayCtx.moveTo(x1, y1);
+              overlayCtx.lineTo(x2, y2);
+              overlayCtx.stroke();
+            }
+          }
+        }
+        
+        // Draw distance/magnification labels for off-screen target cells
+        for (const cell of (offScreenTargetCells || [])) {
+          if (!cell.target) continue;
+          
+          const target = cell.target;
+          const worldPos = getTargetWorldPosition(target);
+          const projected = projectToScreen(worldPos.x, worldPos.z);
+          const blendedAlt = getBlendedAltitude(target, projected.x, projected.y);
+          
+          // Find the shared border edge (non-screen-edge segments)
+          // and position label at its midpoint
+          const poly = cell.polygon;
+          let labelX = (screenW / 2 + cell.x) / 2;  // fallback
+          let labelY = (screenH / 2 + cell.y) / 2;
+          
+          if (poly && poly.length > 2) {
+            // Find the longest non-screen-edge segment (likely the shared border)
+            let longestLen = 0;
+            let longestMidX = labelX;
+            let longestMidY = labelY;
+            
+            for (let i = 0; i < poly.length - 1; i++) {
+              const x1 = poly[i][0], y1 = poly[i][1];
+              const x2 = poly[i + 1][0], y2 = poly[i + 1][1];
+              
+              if (!isOnScreenEdge(x1, y1, x2, y2)) {
+                const len = Math.hypot(x2 - x1, y2 - y1);
+                if (len > longestLen) {
+                  longestLen = len;
+                  longestMidX = (x1 + x2) / 2;
+                  longestMidY = (y1 + y2) / 2;
+                }
+              }
+            }
+            
+            labelX = longestMidX;
+            labelY = longestMidY;
+          }
+          
+          const distNm = (target.range / 6076).toFixed(1);
+          const mag = PLAYER_CAM_HEIGHT / blendedAlt;
+          const magText = mag >= 1 ? `${mag.toFixed(1)}×` : `${mag.toFixed(2)}×`;
+          const labelText = `${distNm}nm ${magText}`;
+          
+          const isSelected = target === targets[selectedTargetIndex];
+          const bgColor = isSelected ? 'rgba(80,80,0,0.85)' : 'rgba(0,0,0,0.75)';
+          const textColor = isSelected ? '#ffff00' : '#ffffff';
+          drawBoxedLabel(labelText, labelX, labelY, bgColor, textColor);
+          
+          // Draw target name above seed
+          overlayCtx.font = 'bold 12px monospace';
+          overlayCtx.textAlign = 'center';
+          overlayCtx.textBaseline = 'bottom';
+          overlayCtx.fillStyle = isSelected ? '#ffff00' : '#ffffff';
+          overlayCtx.fillText(target.name, cell.x, cell.y - 8);
+        }
+        
+        // Draw UI cell labels
+        for (const cell of (uiCellsList || [])) {
+          if (!cell.uiCell) continue;
+          
+          overlayCtx.font = 'bold 11px monospace';
+          overlayCtx.textAlign = 'center';
+          overlayCtx.textBaseline = 'bottom';
+          overlayCtx.fillStyle = '#88ffff';
+          overlayCtx.fillText(cell.uiCell.label, cell.x, cell.y - 8);
+        }
+      }
+      
+      if (showDebug) drawDebugOverlay(cells);
+    }
+    
+    function drawDebugOverlay(cells) {
+      for (const cell of cells) {
+        const isSelected = cell.target === targets[selectedTargetIndex];
+        
+        if (cell.type === 'player') {
+          overlayCtx.fillStyle = '#00ff00';
+        } else if (cell.type === 'ui') {
+          overlayCtx.fillStyle = '#00ffff';
+        } else {
+          overlayCtx.fillStyle = isSelected ? '#ffff00' : '#888800';
+        }
+        
+        overlayCtx.beginPath();
+        overlayCtx.arc(cell.x, cell.y, 6, 0, Math.PI * 2);
+        overlayCtx.fill();
+        
+        overlayCtx.fillStyle = '#ffffff';
+        overlayCtx.font = '10px monospace';
+        overlayCtx.textAlign = 'left';
+        overlayCtx.fillText(`${cell.id}`, cell.x + 10, cell.y + 4);
+      }
+      
+      for (const target of targets) {
+        const worldPos = getTargetWorldPosition(target);
+        const projected = projectToScreen(worldPos.x, worldPos.z);
+        
+        overlayCtx.strokeStyle = '#' + target.color.toString(16).padStart(6, '0');
+        overlayCtx.lineWidth = 1;
+        overlayCtx.setLineDash([4, 4]);
+        overlayCtx.beginPath();
+        overlayCtx.moveTo(screenW / 2, screenH / 2);
+        overlayCtx.lineTo(projected.x, projected.y);
+        overlayCtx.stroke();
+        overlayCtx.setLineDash([]);
+        
+        overlayCtx.fillStyle = projected.visible ? '#00ff00' : '#ff0000';
+        overlayCtx.beginPath();
+        overlayCtx.arc(projected.x, projected.y, 4, 0, Math.PI * 2);
+        overlayCtx.fill();
+      }
+      
+      overlayCtx.strokeStyle = 'rgba(255,255,255,0.3)';
+      overlayCtx.lineWidth = 1;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(screenW/2 - 20, screenH/2);
+      overlayCtx.lineTo(screenW/2 + 20, screenH/2);
+      overlayCtx.moveTo(screenW/2, screenH/2 - 20);
+      overlayCtx.lineTo(screenW/2, screenH/2 + 20);
+      overlayCtx.stroke();
+    }
+
+    // === MAIN LOOP ===
+    
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      if (playerRotating) {
+        playerHeading = (playerHeading + 0.3) % 360;
+      }
+      
+      updatePlayerCamera();
+      updateSceneRotation();
+      updateTargetMarkers();
+      updateUiCells();
+      
+      const vertices = computeVoronoiVertices();
+      voronoiCells = computeVoronoiCells(vertices);
+      
+      const onScreenCells = voronoiCells.filter(c => c.onScreen);
+      const offScreenTargetCells = voronoiCells.filter(c => !c.onScreen && c.type === 'target');
+      const uiCellsList = voronoiCells.filter(c => c.type === 'ui');
+      const allExclusiveCells = [...offScreenTargetCells, ...uiCellsList];
+      
+      for (const cell of offScreenTargetCells) {
+        const worldPos = getTargetWorldPosition(cell.target);
+        const projected = projectToScreen(worldPos.x, worldPos.z);
+        const blendedAlt = getBlendedAltitude(cell.target, projected.x, projected.y);
+        updateTargetCamera(cell.id, cell.worldX, cell.worldZ, blendedAlt);
+      }
+      
+      // === RENDER ===
+      
+      // 1. Clear all buffers with background color
+      gl.clearColor(0.067, 0.133, 0.2, 1);  // #112233
+      gl.clearStencil(0);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+      
+      if (allExclusiveCells.length === 0) {
+        // No exclusive cells: simple render
+        renderer.render(scene, playerCamera);
+      } else {
+        // 2. Write ALL stencil masks using raw GL
+        
+        // On-screen cells get ref = 1
+        for (const cell of onScreenCells) {
+          if (!cell.polygon) continue;
+          writeMask(cell.polygon, 1);
+        }
+        
+        // Exclusive cells get ref = 2, 3, 4, ...
+        for (let i = 0; i < allExclusiveCells.length; i++) {
+          const cell = allExclusiveCells[i];
+          if (!cell.polygon) continue;
+          writeMask(cell.polygon, i + 2);
+        }
+        
+        // 3. Render ALL scenes with stencil test
+        
+        // Render player/merged cell (ref = 1)
+        const playerCell = onScreenCells.find(c => c.type === 'player');
+        if (playerCell) {
+          renderCell(playerCamera, 1, playerCell, scene);
+        }
+        
+        // Render each exclusive cell
+        for (let i = 0; i < allExclusiveCells.length; i++) {
+          const cell = allExclusiveCells[i];
+          const refValue = i + 2;
+          
+          if (cell.type === 'target') {
+            renderCell(targetCameras[cell.id], refValue, cell, scene);
+          } else if (cell.type === 'ui') {
+            const uiScene = uiScenes[cell.id];
+            const uiCamera = uiCameras[cell.id];
+            if (uiScene && uiCamera) {
+              renderUiCell(uiCamera, refValue, cell, uiScene);
+            }
+          }
+        }
+      }
+      
+      drawOverlay(voronoiCells, offScreenTargetCells, uiCellsList);
+      updateStatus();
+    }
+
+    // === EVENT HANDLERS ===
+    
+    function onResize() {
+      screenW = window.innerWidth;
+      screenH = window.innerHeight;
+      renderer.setSize(screenW, screenH);
+      overlayCanvas.width = screenW;
+      overlayCanvas.height = screenH;
+      
+      playerCamera.aspect = screenW / screenH;
+      playerCamera.updateProjectionMatrix();
+      for (const id in targetCameras) {
+        targetCameras[id].aspect = screenW / screenH;
+        targetCameras[id].updateProjectionMatrix();
+      }
+    }
+    
+    function onKeyDown(e) {
+      const target = targets[selectedTargetIndex];
+      
+      switch (e.code) {
+        case 'KeyA': playerHeading = (playerHeading - 5 + 360) % 360; break;
+        case 'KeyD': playerHeading = (playerHeading + 5) % 360; break;
+        case 'ArrowLeft': target.bearing = (target.bearing - 10 + 360) % 360; break;
+        case 'ArrowRight': target.bearing = (target.bearing + 10) % 360; break;
+        case 'ArrowUp': target.range = Math.max(1000, target.range - 2000); break;
+        case 'ArrowDown': target.range = Math.min(100000, target.range + 2000); break;
+        case 'KeyW': target.camAltitude = Math.max(20, target.camAltitude - 10); break;
+        case 'KeyS': target.camAltitude = Math.min(200, target.camAltitude + 10); break;
+        case 'Tab':
+          e.preventDefault();
+          selectedTargetIndex = (selectedTargetIndex + 1) % targets.length;
+          break;
+        case 'KeyR': playerRotating = !playerRotating; break;
+        case 'KeyB': showDebug = !showDebug; break;
+        case 'KeyU': 
+          const anyEnabled = uiCells.some(c => c.enabled);
+          uiCells.forEach(c => c.enabled = !anyEnabled);
+          break;
+      }
+    }
+    
+    function updateStatus() {
+      const onScreenCount = voronoiCells.filter(c => c.onScreen).length;
+      const offScreenCount = voronoiCells.filter(c => !c.onScreen && c.type !== 'ui').length;
+      const uiCount = voronoiCells.filter(c => c.type === 'ui').length;
+      let html = `Heading: ${playerHeading.toFixed(0)}°${playerRotating ? ' (auto)' : ''}<br>`;
+      html += `Cells: ${voronoiCells.length} (${onScreenCount} merged, ${offScreenCount} target, ${uiCount} UI)<br>`;
+      html += `Render passes: ${(offScreenCount + uiCount) > 0 ? (offScreenCount + uiCount) + 1 : 1}<br><hr style="border-color:#444">`;
+      
+      for (let i = 0; i < targets.length; i++) {
+        const t = targets[i];
+        const worldPos = getTargetWorldPosition(t);
+        const projected = projectToScreen(worldPos.x, worldPos.z);
+        const isSelected = i === selectedTargetIndex;
+        const nm = (t.range / 6076).toFixed(1);
+        const cell = voronoiCells.find(c => c.id === t.id);
+        const blendedAlt = getBlendedAltitude(t, projected.x, projected.y);
+        
+        html += `<span style="color:${isSelected ? '#ffff00' : '#888'}">`;
+        html += `${isSelected ? '► ' : '  '}<b>${t.name}</b>: ${t.bearing}° @ ${nm}nm`;
+        html += ` alt:${t.camAltitude}→${blendedAlt.toFixed(0)}`;
+        html += ` ${cell?.onScreen ? '✓' : '○'}</span><br>`;
+      }
+      
+      document.getElementById('status').innerHTML = html;
+    }
+
+    // === START ===
+    init();
+  </script>
+</body>
+</html>
