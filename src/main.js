@@ -26,19 +26,16 @@ let lastTime = 0;
 let debugElement = null;
 let currentTerrainZ = 0;
 
-// Phase 2 Test Target - FIXED WORLD POSITION (does not move with player)
-let testTargetCell = null;
-let testTargetEnabled = false;
-const testTarget = {
-  worldX: 0,            // Fixed world X (set when dropped)
-  worldY: 0,            // Fixed world Y (set when dropped)
-  name: 'TestTarget'
-};
+// Phase 2 Test Targets - Multiple targets at fixed world positions
+const MAX_TARGETS = 5;
+const TARGET_NAMES = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo'];
+const TARGET_COLORS = [0xff4444, 0x44ff44, 0x4444ff, 0xffff44, 0xff44ff];
+const testTargets = [];  // Array of target objects
+let nextTargetId = 0;    // Incrementing ID for deterministic ordering
+
 const SCREEN_INSET = 30;
 const VISIBILITY_MARGIN = 10;  // Small margin - split only when truly off-screen
-
-// Debug marker for target position
-let debugTargetMarker = null;
+const MIN_SEED_DISTANCE = 40;  // Minimum distance between seeds for deconfliction
 
 // Three.js lighting
 let directionalLight = null;
@@ -289,8 +286,13 @@ function initLightingControls() {
 
       // Phase 2 Test Target Controls
       case 'Digit9':
-        // Toggle test target on/off (drops marker 3000ft ahead)
-        toggleTestTarget();
+        if (e.shiftKey) {
+          // Shift+9: Clear all targets
+          clearAllTargets();
+        } else {
+          // 9: Drop new target at current position
+          dropTarget();
+        }
         break;
     }
 
@@ -458,129 +460,204 @@ function rayToScreenEdge(targetX, targetY, screenW, screenH) {
 }
 
 /**
- * Update the test target cell each frame
+ * Deconflict off-screen target seeds that are too close together
+ * Uses deterministic ordering by target ID to prevent flicker
  *
- * Target is at a FIXED world position (set when dropped with key 9).
- * As player moves/turns, target may go on-screen or off-screen.
+ * @param {Array} offScreenTargets - Array of targets with their computed seed positions
  */
-function updateTestTarget() {
-  if (!testTargetEnabled || !testTargetCell) return;
+function deconflictSeeds(offScreenTargets) {
+  const screenW = window.innerWidth;
+  const screenH = window.innerHeight;
+  const cx = screenW / 2;
+  const cy = screenH / 2;
+
+  for (const target of offScreenTargets) {
+    for (const other of offScreenTargets) {
+      if (target === other) continue;
+
+      const dist = Math.hypot(target.seedX - other.seedX, target.seedY - other.seedY);
+      if (dist < MIN_SEED_DISTANCE) {
+        // Push seeds apart along tangent to screen edge
+        const edgeDx = target.seedX - cx;
+        const edgeDy = target.seedY - cy;
+        const edgeLen = Math.hypot(edgeDx, edgeDy);
+
+        if (edgeLen > 0) {
+          const tangentX = -edgeDy / edgeLen;
+          const tangentY = edgeDx / edgeLen;
+
+          const offset = (MIN_SEED_DISTANCE - dist) / 2 + 5;
+          // Deterministic ordering by target ID
+          const sign = target.id < other.id ? 1 : -1;
+          target.seedX += tangentX * offset * sign;
+          target.seedY += tangentY * offset * sign;
+        }
+      }
+    }
+
+    // Clamp to screen bounds
+    const margin = 5;
+    target.seedX = Math.max(margin, Math.min(screenW - margin, target.seedX));
+    target.seedY = Math.max(margin, Math.min(screenH - margin, target.seedY));
+  }
+}
+
+/**
+ * Update all test targets each frame
+ *
+ * Each target is at a FIXED world position (set when dropped with key 9).
+ * As player moves/turns, targets may go on-screen or off-screen.
+ *
+ * IMPORTANT: ALL targets get a Voronoi seed to protect their screen space:
+ * - On-screen targets: seed at projected screen position, merged with player cell (ref=1)
+ * - Off-screen targets: seed at screen edge, exclusive cell with own camera
+ */
+function updateTestTargets() {
+  if (testTargets.length === 0) return;
 
   const screenW = window.innerWidth;
   const screenH = window.innerHeight;
 
-  // Target is at FIXED world position
-  const targetWorldX = testTarget.worldX;
-  const targetWorldY = testTarget.worldY;
+  // First pass: compute projected positions and seed positions for ALL targets
+  const offScreenTargets = [];
 
-  // Project to screen to determine if on-screen or off-screen
-  const projected = projectToScreen(targetWorldX, targetWorldY, player.x, player.y, player.heading);
+  for (const target of testTargets) {
+    // Project to screen to determine if on-screen or off-screen
+    const projected = projectToScreen(target.worldX, target.worldY, player.x, player.y, player.heading);
+    target.onScreen = projected.visible;
+    target.projectedX = projected.x;
+    target.projectedY = projected.y;
 
-  // Determine if target is on-screen (visible in player viewport)
-  const onScreen = projected.visible;
-
-  if (onScreen) {
-    // ON-SCREEN: No Voronoi split needed - remove cell if it exists
-    if (testTargetCell && voronoiCellManager.cells.includes(testTargetCell)) {
-      voronoiCellManager.removeCell(testTargetCell);
-      testTargetCell = { onScreen: true };
-    }
-  } else {
-    // OFF-SCREEN: Need Voronoi split
-    // Re-add cell if it was removed
-    if (!voronoiCellManager.cells.includes(testTargetCell)) {
-      testTargetCell = voronoiCellManager.addCell('target');
-      testTargetCell.target = testTarget;
-    }
-
-    // Position seed at screen edge
-    const edge = rayToScreenEdge(projected.x, projected.y, screenW, screenH);
-    const dx = edge.x - screenW / 2;
-    const dy = edge.y - screenH / 2;
-    const len = Math.hypot(dx, dy);
-    if (len > 0) {
-      testTargetCell.seed.x = edge.x - (dx / len) * SCREEN_INSET;
-      testTargetCell.seed.y = edge.y - (dy / len) * SCREEN_INSET;
+    if (target.onScreen) {
+      // ON-SCREEN: seed at actual screen position to protect screen space
+      target.seedX = projected.x;
+      target.seedY = projected.y;
     } else {
-      testTargetCell.seed.x = screenW / 2;
-      testTargetCell.seed.y = SCREEN_INSET;
+      // OFF-SCREEN: seed at screen edge along bearing
+      const edge = rayToScreenEdge(projected.x, projected.y, screenW, screenH);
+      const dx = edge.x - screenW / 2;
+      const dy = edge.y - screenH / 2;
+      const len = Math.hypot(dx, dy);
+      if (len > 0) {
+        target.seedX = edge.x - (dx / len) * SCREEN_INSET;
+        target.seedY = edge.y - (dy / len) * SCREEN_INSET;
+      } else {
+        target.seedX = screenW / 2;
+        target.seedY = SCREEN_INSET;
+      }
+      offScreenTargets.push(target);
     }
-    testTargetCell.onScreen = false;
+  }
 
-    // UPDATE TARGET CAMERA
-    // Offset from player to target in world coords
-    const offsetX = targetWorldX - player.x;
-    const offsetY = targetWorldY - player.y;
+  // Apply deconfliction to off-screen targets only
+  if (offScreenTargets.length > 1) {
+    deconflictSeeds(offScreenTargets);
+  }
 
-    // Apply heading rotation (same as pivotGroup.rotation.z)
-    const cos = Math.cos(player.heading);
-    const sin = Math.sin(player.heading);
-    const rotatedX = offsetX * cos - offsetY * sin;
-    const rotatedY = offsetX * sin + offsetY * cos;
+  // Second pass: update cells for ALL targets
+  for (const target of testTargets) {
+    // Ensure cell exists for this target
+    if (!target.cell || !voronoiCellManager.cells.includes(target.cell)) {
+      target.cell = voronoiCellManager.addCell('target');
+      target.cell.target = target;
+    }
 
-    // Position target camera at the rotated offset from origin
-    const mainCamera = renderer.getCamera();
-    const cameraZ = renderer.getCameraZ();
+    // Update seed position (all targets have seeds)
+    target.cell.seed.x = target.seedX;
+    target.cell.seed.y = target.seedY;
+    target.cell.onScreen = target.onScreen;
 
-    testTargetCell.camera.position.set(rotatedX, rotatedY, cameraZ);
-    testTargetCell.camera.lookAt(rotatedX, rotatedY, currentTerrainZ);
-    testTargetCell.camera.up.set(0, 1, 0);
-    testTargetCell.camera.fov = mainCamera.fov;
-    testTargetCell.camera.aspect = screenW / screenH;
-    testTargetCell.camera.near = mainCamera.near;
-    testTargetCell.camera.far = mainCamera.far;
-    testTargetCell.camera.updateProjectionMatrix();
+    if (!target.onScreen) {
+      // OFF-SCREEN: update target camera for exclusive rendering
+      const offsetX = target.worldX - player.x;
+      const offsetY = target.worldY - player.y;
 
-    // Recompute Voronoi with updated seed
+      // Apply heading rotation (same as pivotGroup.rotation.z)
+      const cos = Math.cos(player.heading);
+      const sin = Math.sin(player.heading);
+      const rotatedX = offsetX * cos - offsetY * sin;
+      const rotatedY = offsetX * sin + offsetY * cos;
+
+      // Position target camera at the rotated offset from origin
+      const mainCamera = renderer.getCamera();
+      const cameraZ = renderer.getCameraZ();
+
+      target.cell.camera.position.set(rotatedX, rotatedY, cameraZ);
+      target.cell.camera.lookAt(rotatedX, rotatedY, currentTerrainZ);
+      target.cell.camera.up.set(0, 1, 0);
+      target.cell.camera.fov = mainCamera.fov;
+      target.cell.camera.aspect = screenW / screenH;
+      target.cell.camera.near = mainCamera.near;
+      target.cell.camera.far = mainCamera.far;
+      target.cell.camera.updateProjectionMatrix();
+    }
+    // ON-SCREEN targets don't need camera updates - they render with player camera
+  }
+
+  // Always recompute Voronoi since all targets have seeds
+  if (testTargets.length > 0) {
     voronoiCellManager.computeVoronoi();
   }
 }
 
 /**
- * Toggle test target on/off
- * When enabled, drops a marker at a fixed world position 3000 feet ahead of player
+ * Drop a new target at the player's current position
+ * Up to MAX_TARGETS can exist simultaneously
  */
-function toggleTestTarget() {
-  testTargetEnabled = !testTargetEnabled;
-
-  if (testTargetEnabled) {
-    // Drop target 3000 feet ahead of current player position/heading
-    const dropDistance = 3000;
-    testTarget.worldX = player.x + Math.sin(player.heading) * dropDistance;
-    testTarget.worldY = player.y + Math.cos(player.heading) * dropDistance;
-
-    // Create debug marker - a bright box visible in the terrain
-    const markerGeometry = new THREE.BoxGeometry(50, 50, 50);
-    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-    debugTargetMarker = new THREE.Mesh(markerGeometry, markerMaterial);
-    debugTargetMarker.name = 'debugTargetMarker';
-    // Position at fixed world coords
-    debugTargetMarker.position.set(testTarget.worldX, testTarget.worldY, 5);
-    // Add to terrain group so it renders with terrain
-    terrainRenderer.getTerrainGroup().add(debugTargetMarker);
-
-    // Create placeholder for target cell (will be added when off-screen)
-    testTargetCell = { onScreen: true };
-
-    console.log('Target dropped at world position:', testTarget.worldX.toFixed(0), testTarget.worldY.toFixed(0));
-    console.log('Turn away to move target off-screen and see Voronoi split');
-  } else {
-    // Remove debug marker
-    if (debugTargetMarker) {
-      terrainRenderer.getTerrainGroup().remove(debugTargetMarker);
-      debugTargetMarker.geometry.dispose();
-      debugTargetMarker.material.dispose();
-      debugTargetMarker = null;
-    }
-
-    // Remove test target cell if it exists in the manager
-    if (testTargetCell && voronoiCellManager.cells.includes(testTargetCell)) {
-      voronoiCellManager.removeCell(testTargetCell);
-    }
-    testTargetCell = null;
-
-    console.log('Target removed');
+function dropTarget() {
+  if (testTargets.length >= MAX_TARGETS) {
+    console.log(`Maximum ${MAX_TARGETS} targets reached`);
+    return;
   }
+
+  const targetIndex = testTargets.length;
+  const targetId = nextTargetId++;
+
+  // Create target object
+  const target = {
+    id: targetId,
+    worldX: player.x,  // Drop at current position (not ahead)
+    worldY: player.y,
+    name: TARGET_NAMES[targetIndex],
+    color: TARGET_COLORS[targetIndex],
+    marker: null,
+    cell: null,        // Will be set when off-screen
+    onScreen: true
+  };
+
+  // Create debug marker - a bright box visible in the terrain
+  const markerGeometry = new THREE.BoxGeometry(50, 50, 50);
+  const markerMaterial = new THREE.MeshBasicMaterial({ color: target.color });
+  target.marker = new THREE.Mesh(markerGeometry, markerMaterial);
+  target.marker.name = `targetMarker_${target.name}`;
+  target.marker.position.set(target.worldX, target.worldY, 5);
+  terrainRenderer.getTerrainGroup().add(target.marker);
+
+  testTargets.push(target);
+
+  console.log(`Target ${target.name} dropped at (${target.worldX.toFixed(0)}, ${target.worldY.toFixed(0)}) [${testTargets.length}/${MAX_TARGETS}]`);
+}
+
+/**
+ * Clear all test targets
+ */
+function clearAllTargets() {
+  for (const target of testTargets) {
+    // Remove marker
+    if (target.marker) {
+      terrainRenderer.getTerrainGroup().remove(target.marker);
+      target.marker.geometry.dispose();
+      target.marker.material.dispose();
+    }
+
+    // Remove Voronoi cell if it exists
+    if (target.cell && voronoiCellManager.cells.includes(target.cell)) {
+      voronoiCellManager.removeCell(target.cell);
+    }
+  }
+
+  testTargets.length = 0;
+  console.log('All targets cleared');
 }
 
 // ============================================
@@ -645,8 +722,8 @@ function update(deltaTime) {
   //   airbaseCellController.update(player.x, player.y, player.altitude, deltaTime);
   // }
 
-  // Update Phase 2 test target (if enabled)
-  updateTestTarget();
+  // Update Phase 2 test targets
+  updateTestTargets();
 
   // Update Voronoi cell cameras
   voronoiCellManager.updateCameras();
@@ -687,15 +764,20 @@ function updateDebug(deltaTime) {
       }
     }
 
-    // Build test target info
-    let targetInfo = 'OFF (press 9)';
-    if (testTargetEnabled && testTargetCell) {
-      const dx = testTarget.worldX - player.x;
-      const dy = testTarget.worldY - player.y;
+    // Build test targets info
+    let targetInfo = `${testTargets.length}/${MAX_TARGETS}`;
+    if (testTargets.length === 0) {
+      targetInfo += ' (press 9)';
+    }
+
+    // Build individual target status lines
+    const targetLines = testTargets.map(t => {
+      const dx = t.worldX - player.x;
+      const dy = t.worldY - player.y;
       const dist = Math.hypot(dx, dy);
       const distNm = (dist / 6076).toFixed(1);
-      targetInfo = `${distNm}nm (${testTargetCell.onScreen ? 'ON-SCREEN' : 'OFF-SCREEN'})`;
-    }
+      return `  ${t.name}: ${distNm}nm ${t.onScreen ? '✓' : '○'}`;
+    });
 
     debugElement.innerHTML = [
       `FPS: ${fps}`,
@@ -711,8 +793,9 @@ function updateDebug(deltaTime) {
       `QUEUE: ${chunkManager.getQueuedChunkCount()}`,
       `--- VORONOI CELLS ---`,
       `CELLS: ${voronoiCellManager ? voronoiCellManager.cells.length : 0}`,
-      `--- TEST TARGET (9) ---`,
-      `TARGET: ${targetInfo}`,
+      `--- TARGETS (9/Shift+9) ---`,
+      `COUNT: ${targetInfo}`,
+      ...targetLines,
       `--- AIRBASE ---`,
       `NEAR: ${airbaseInfo}`,
       `RENDERED: ${airbaseRenderer ? airbaseRenderer.getRenderedCount() : 0}`,

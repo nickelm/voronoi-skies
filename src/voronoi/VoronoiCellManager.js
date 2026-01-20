@@ -158,29 +158,38 @@ export class VoronoiCellManager {
   /**
    * Render multiple cells with stencil masking
    * Uses two-phase rendering: write all masks first, then render all scenes
+   *
+   * Cell classification:
+   * - On-screen cells (player + on-screen targets): share stencil ref=1, render with player camera
+   * - Off-screen cells (off-screen targets): get unique refs (2, 3, 4...), render with own cameras
+   *
    * @private
    */
   _renderMultiCell() {
     const gl = this.renderer.getContext();
 
-    // Separate cells by type
+    // Separate cells into on-screen (merged) and off-screen (exclusive)
     const playerCell = this.getPlayerCell();
-    const exclusiveCells = this.cells.filter(c => c.type !== 'player');
+    const onScreenCells = this.cells.filter(c => c.type === 'player' || c.onScreen === true);
+    const exclusiveCells = this.cells.filter(c => c.type !== 'player' && c.onScreen === false);
 
     // Debug logging (occasional)
     if (Math.random() < 0.005) {
-      console.log('_renderMultiCell: player polygon:', playerCell?.polygon?.length,
+      console.log('_renderMultiCell: on-screen cells:', onScreenCells.length,
         'exclusive cells:', exclusiveCells.length,
-        exclusiveCells.map(c => ({ seed: c.seed, polyLen: c.polygon?.length })));
+        exclusiveCells.map(c => ({ seed: c.seed, polyLen: c.polygon?.length, onScreen: c.onScreen })));
     }
 
     // Phase 1: Write ALL stencil masks first
-    // Player/on-screen cells get ref=1
-    if (playerCell && playerCell.polygon) {
-      this.viewportManager.writeMask(playerCell.polygon, 1);
+
+    // On-screen cells (player + visible targets) all get ref=1 - they merge
+    for (const cell of onScreenCells) {
+      if (cell.polygon) {
+        this.viewportManager.writeMask(cell.polygon, 1);
+      }
     }
 
-    // Exclusive cells get ref=2, 3, 4...
+    // Off-screen/exclusive cells get ref=2, 3, 4...
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
       if (cell.polygon) {
@@ -190,15 +199,15 @@ export class VoronoiCellManager {
 
     // Phase 2: Render all scenes with stencil test
 
-    // 2a. Render player cell (ref=1) - NO viewport offset (centered)
+    // 2a. Render merged on-screen area (ref=1) with player camera - NO frustum shift
     if (playerCell) {
       this._renderCellWithStencil(playerCell, 1, false);
     }
 
-    // 2b. Render exclusive cells WITH viewport offset
+    // 2b. Render exclusive off-screen cells WITH frustum shift
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
-      this._renderCellWithStencil(cell, i + 2, true);  // useViewportOffset = true
+      this._renderCellWithStencil(cell, i + 2, true);
     }
   }
 

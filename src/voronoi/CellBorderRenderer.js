@@ -48,7 +48,34 @@ export class CellBorderRenderer {
   }
 
   /**
+   * Check if a line segment lies on the screen edge
+   * @param {number} x1 - Start X (screen coords)
+   * @param {number} y1 - Start Y (screen coords)
+   * @param {number} x2 - End X (screen coords)
+   * @param {number} y2 - End Y (screen coords)
+   * @returns {boolean} True if segment is on screen edge
+   */
+  isOnScreenEdge(x1, y1, x2, y2) {
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+    const threshold = 2;
+
+    // Left edge
+    if (Math.abs(x1) < threshold && Math.abs(x2) < threshold) return true;
+    // Right edge
+    if (Math.abs(x1 - screenW) < threshold && Math.abs(x2 - screenW) < threshold) return true;
+    // Top edge
+    if (Math.abs(y1) < threshold && Math.abs(y2) < threshold) return true;
+    // Bottom edge
+    if (Math.abs(y1 - screenH) < threshold && Math.abs(y2 - screenH) < threshold) return true;
+
+    return false;
+  }
+
+  /**
    * Build border geometry from Voronoi cell polygons
+   * Only draws borders for EXCLUSIVE (off-screen) cells, not merged on-screen cells
+   * Also skips segments that lie on screen edges
    * @param {Array} cells - Array of VoronoiCell instances
    */
   updateFromCells(cells) {
@@ -63,14 +90,26 @@ export class CellBorderRenderer {
 
     const positions = [];
 
-    // Collect all cell edges and convert to NDC
-    for (const cell of cells) {
+    // Only draw borders for EXCLUSIVE cells (off-screen targets, UI cells)
+    // On-screen cells (player + visible targets) merge and should have no internal borders
+    const exclusiveCells = cells.filter(c => c.type !== 'player' && c.onScreen === false);
+
+    // Collect edges from exclusive cells, skip screen-edge segments
+    for (const cell of exclusiveCells) {
       if (!cell.polygon) continue;
 
       const polygon = cell.polygon;
       for (let i = 0; i < polygon.length - 1; i++) {
-        const [x1, y1] = this.screenToNDC(polygon[i][0], polygon[i][1]);
-        const [x2, y2] = this.screenToNDC(polygon[i + 1][0], polygon[i + 1][1]);
+        const sx1 = polygon[i][0];
+        const sy1 = polygon[i][1];
+        const sx2 = polygon[i + 1][0];
+        const sy2 = polygon[i + 1][1];
+
+        // Skip segments on screen edges
+        if (this.isOnScreenEdge(sx1, sy1, sx2, sy2)) continue;
+
+        const [x1, y1] = this.screenToNDC(sx1, sy1);
+        const [x2, y2] = this.screenToNDC(sx2, sy2);
         positions.push(x1, y1, 0, x2, y2, 0);
       }
     }
