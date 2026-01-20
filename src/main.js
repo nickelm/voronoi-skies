@@ -26,6 +26,20 @@ let lastTime = 0;
 let debugElement = null;
 let currentTerrainZ = 0;
 
+// Phase 2 Test Target - FIXED WORLD POSITION (does not move with player)
+let testTargetCell = null;
+let testTargetEnabled = false;
+const testTarget = {
+  worldX: 0,            // Fixed world X (set when dropped)
+  worldY: 0,            // Fixed world Y (set when dropped)
+  name: 'TestTarget'
+};
+const SCREEN_INSET = 30;
+const VISIBILITY_MARGIN = 10;  // Small margin - split only when truly off-screen
+
+// Debug marker for target position
+let debugTargetMarker = null;
+
 // Three.js lighting
 let directionalLight = null;
 let ambientLight = null;
@@ -272,6 +286,12 @@ function initLightingControls() {
         console.log('Time preset: NIGHT');
         updated = true;
         break;
+
+      // Phase 2 Test Target Controls
+      case 'Digit9':
+        // Toggle test target on/off (drops marker 3000ft ahead)
+        toggleTestTarget();
+        break;
     }
 
     if (updated) {
@@ -333,6 +353,240 @@ function syncLightsToConfig(skyColor = null) {
   updateLightDirection();
 }
 
+// ============================================
+// Phase 2 Test Target Helper Functions
+// ============================================
+
+/**
+ * Project a world position to screen coordinates
+ *
+ * This game's coordinate system:
+ * - World: X = east, Y = north (2D plane)
+ * - Screen: Camera at Z=600 looking at origin along -Z
+ * - Terrain rotates around Z axis by player heading
+ * - The pivotGroup applies: rotation.z = heading, then terrainGroup offset = -playerPos
+ *
+ * To project a world point to screen:
+ * 1. Get offset from player position
+ * 2. Rotate by player heading (same as terrain rotation)
+ * 3. Project through camera
+ *
+ * @param {number} worldX - World X position
+ * @param {number} worldY - World Y position
+ * @param {number} playerX - Player world X
+ * @param {number} playerY - Player world Y
+ * @param {number} playerHeading - Player heading in radians
+ * @returns {{x: number, y: number, visible: boolean}}
+ */
+function projectToScreen(worldX, worldY, playerX, playerY, playerHeading) {
+  const mainCamera = renderer.getCamera();
+  const screenW = window.innerWidth;
+  const screenH = window.innerHeight;
+
+  // Get offset from player to target
+  const offsetX = worldX - playerX;
+  const offsetY = worldY - playerY;
+
+  // Apply heading rotation (same as pivotGroup.rotation.z)
+  const cos = Math.cos(playerHeading);
+  const sin = Math.sin(playerHeading);
+  const rotatedX = offsetX * cos - offsetY * sin;
+  const rotatedY = offsetX * sin + offsetY * cos;
+
+  // Create point in camera space (terrain is at Z=0 relative to where camera looks)
+  // But we need to account for terrain Z position which varies with altitude
+  const point = new THREE.Vector3(rotatedX, rotatedY, currentTerrainZ);
+  const projected = point.project(mainCamera);
+
+  const screenX = (projected.x + 1) / 2 * screenW;
+  const screenY = (1 - projected.y) / 2 * screenH;
+
+  const visible = screenX >= VISIBILITY_MARGIN &&
+                  screenX <= screenW - VISIBILITY_MARGIN &&
+                  screenY >= VISIBILITY_MARGIN &&
+                  screenY <= screenH - VISIBILITY_MARGIN &&
+                  projected.z > 0 && projected.z < 1;
+
+  return { x: screenX, y: screenY, visible };
+}
+
+/**
+ * Find where a ray from screen center to a point intersects the screen edge
+ * @param {number} targetX - Target screen X
+ * @param {number} targetY - Target screen Y
+ * @param {number} screenW - Screen width
+ * @param {number} screenH - Screen height
+ * @returns {{x: number, y: number}}
+ */
+function rayToScreenEdge(targetX, targetY, screenW, screenH) {
+  const cx = screenW / 2;
+  const cy = screenH / 2;
+  const dx = targetX - cx;
+  const dy = targetY - cy;
+
+  if (dx === 0 && dy === 0) return { x: cx, y: 0 };
+
+  let tMin = Infinity;
+  let hit = null;
+
+  // Left edge
+  if (dx < 0) {
+    const t = -cx / dx;
+    const y = cy + t * dy;
+    if (y >= 0 && y <= screenH && t < tMin) { tMin = t; hit = { x: 0, y }; }
+  }
+  // Right edge
+  if (dx > 0) {
+    const t = (screenW - cx) / dx;
+    const y = cy + t * dy;
+    if (y >= 0 && y <= screenH && t < tMin) { tMin = t; hit = { x: screenW, y }; }
+  }
+  // Top edge
+  if (dy < 0) {
+    const t = -cy / dy;
+    const x = cx + t * dx;
+    if (x >= 0 && x <= screenW && t < tMin) { tMin = t; hit = { x, y: 0 }; }
+  }
+  // Bottom edge
+  if (dy > 0) {
+    const t = (screenH - cy) / dy;
+    const x = cx + t * dx;
+    if (x >= 0 && x <= screenW && t < tMin) { tMin = t; hit = { x, y: screenH }; }
+  }
+
+  return hit || { x: cx, y: 0 };
+}
+
+/**
+ * Update the test target cell each frame
+ *
+ * Target is at a FIXED world position (set when dropped with key 9).
+ * As player moves/turns, target may go on-screen or off-screen.
+ */
+function updateTestTarget() {
+  if (!testTargetEnabled || !testTargetCell) return;
+
+  const screenW = window.innerWidth;
+  const screenH = window.innerHeight;
+
+  // Target is at FIXED world position
+  const targetWorldX = testTarget.worldX;
+  const targetWorldY = testTarget.worldY;
+
+  // Project to screen to determine if on-screen or off-screen
+  const projected = projectToScreen(targetWorldX, targetWorldY, player.x, player.y, player.heading);
+
+  // Determine if target is on-screen (visible in player viewport)
+  const onScreen = projected.visible;
+
+  if (onScreen) {
+    // ON-SCREEN: No Voronoi split needed - remove cell if it exists
+    if (testTargetCell && voronoiCellManager.cells.includes(testTargetCell)) {
+      voronoiCellManager.removeCell(testTargetCell);
+      testTargetCell = { onScreen: true };
+    }
+  } else {
+    // OFF-SCREEN: Need Voronoi split
+    // Re-add cell if it was removed
+    if (!voronoiCellManager.cells.includes(testTargetCell)) {
+      testTargetCell = voronoiCellManager.addCell('target');
+      testTargetCell.target = testTarget;
+    }
+
+    // Position seed at screen edge
+    const edge = rayToScreenEdge(projected.x, projected.y, screenW, screenH);
+    const dx = edge.x - screenW / 2;
+    const dy = edge.y - screenH / 2;
+    const len = Math.hypot(dx, dy);
+    if (len > 0) {
+      testTargetCell.seed.x = edge.x - (dx / len) * SCREEN_INSET;
+      testTargetCell.seed.y = edge.y - (dy / len) * SCREEN_INSET;
+    } else {
+      testTargetCell.seed.x = screenW / 2;
+      testTargetCell.seed.y = SCREEN_INSET;
+    }
+    testTargetCell.onScreen = false;
+
+    // UPDATE TARGET CAMERA
+    // Offset from player to target in world coords
+    const offsetX = targetWorldX - player.x;
+    const offsetY = targetWorldY - player.y;
+
+    // Apply heading rotation (same as pivotGroup.rotation.z)
+    const cos = Math.cos(player.heading);
+    const sin = Math.sin(player.heading);
+    const rotatedX = offsetX * cos - offsetY * sin;
+    const rotatedY = offsetX * sin + offsetY * cos;
+
+    // Position target camera at the rotated offset from origin
+    const mainCamera = renderer.getCamera();
+    const cameraZ = renderer.getCameraZ();
+
+    testTargetCell.camera.position.set(rotatedX, rotatedY, cameraZ);
+    testTargetCell.camera.lookAt(rotatedX, rotatedY, currentTerrainZ);
+    testTargetCell.camera.up.set(0, 1, 0);
+    testTargetCell.camera.fov = mainCamera.fov;
+    testTargetCell.camera.aspect = screenW / screenH;
+    testTargetCell.camera.near = mainCamera.near;
+    testTargetCell.camera.far = mainCamera.far;
+    testTargetCell.camera.updateProjectionMatrix();
+
+    // Recompute Voronoi with updated seed
+    voronoiCellManager.computeVoronoi();
+  }
+}
+
+/**
+ * Toggle test target on/off
+ * When enabled, drops a marker at a fixed world position 3000 feet ahead of player
+ */
+function toggleTestTarget() {
+  testTargetEnabled = !testTargetEnabled;
+
+  if (testTargetEnabled) {
+    // Drop target 3000 feet ahead of current player position/heading
+    const dropDistance = 3000;
+    testTarget.worldX = player.x + Math.sin(player.heading) * dropDistance;
+    testTarget.worldY = player.y + Math.cos(player.heading) * dropDistance;
+
+    // Create debug marker - a bright box visible in the terrain
+    const markerGeometry = new THREE.BoxGeometry(50, 50, 50);
+    const markerMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    debugTargetMarker = new THREE.Mesh(markerGeometry, markerMaterial);
+    debugTargetMarker.name = 'debugTargetMarker';
+    // Position at fixed world coords
+    debugTargetMarker.position.set(testTarget.worldX, testTarget.worldY, 5);
+    // Add to terrain group so it renders with terrain
+    terrainRenderer.getTerrainGroup().add(debugTargetMarker);
+
+    // Create placeholder for target cell (will be added when off-screen)
+    testTargetCell = { onScreen: true };
+
+    console.log('Target dropped at world position:', testTarget.worldX.toFixed(0), testTarget.worldY.toFixed(0));
+    console.log('Turn away to move target off-screen and see Voronoi split');
+  } else {
+    // Remove debug marker
+    if (debugTargetMarker) {
+      terrainRenderer.getTerrainGroup().remove(debugTargetMarker);
+      debugTargetMarker.geometry.dispose();
+      debugTargetMarker.material.dispose();
+      debugTargetMarker = null;
+    }
+
+    // Remove test target cell if it exists in the manager
+    if (testTargetCell && voronoiCellManager.cells.includes(testTargetCell)) {
+      voronoiCellManager.removeCell(testTargetCell);
+    }
+    testTargetCell = null;
+
+    console.log('Target removed');
+  }
+}
+
+// ============================================
+// Game Loop
+// ============================================
+
 function gameLoop(currentTime) {
   // Calculate delta time in seconds
   const deltaTime = (currentTime - lastTime) / 1000;
@@ -391,6 +645,9 @@ function update(deltaTime) {
   //   airbaseCellController.update(player.x, player.y, player.altitude, deltaTime);
   // }
 
+  // Update Phase 2 test target (if enabled)
+  updateTestTarget();
+
   // Update Voronoi cell cameras
   voronoiCellManager.updateCameras();
 }
@@ -430,6 +687,16 @@ function updateDebug(deltaTime) {
       }
     }
 
+    // Build test target info
+    let targetInfo = 'OFF (press 9)';
+    if (testTargetEnabled && testTargetCell) {
+      const dx = testTarget.worldX - player.x;
+      const dy = testTarget.worldY - player.y;
+      const dist = Math.hypot(dx, dy);
+      const distNm = (dist / 6076).toFixed(1);
+      targetInfo = `${distNm}nm (${testTargetCell.onScreen ? 'ON-SCREEN' : 'OFF-SCREEN'})`;
+    }
+
     debugElement.innerHTML = [
       `FPS: ${fps}`,
       `X: ${Math.round(player.x)}`,
@@ -444,6 +711,8 @@ function updateDebug(deltaTime) {
       `QUEUE: ${chunkManager.getQueuedChunkCount()}`,
       `--- VORONOI CELLS ---`,
       `CELLS: ${voronoiCellManager ? voronoiCellManager.cells.length : 0}`,
+      `--- TEST TARGET (9) ---`,
+      `TARGET: ${targetInfo}`,
       `--- AIRBASE ---`,
       `NEAR: ${airbaseInfo}`,
       `RENDERED: ${airbaseRenderer ? airbaseRenderer.getRenderedCount() : 0}`,

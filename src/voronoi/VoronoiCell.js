@@ -30,6 +30,12 @@ export class VoronoiCell {
     // World position this camera looks at
     this.cameraTarget = { x: 0, y: 0 };
     this.cameraDistance = 600;  // Distance from target (matches main camera Z)
+
+    // Target tracking properties (Phase 2)
+    this.target = null;                    // Reference to tracked entity
+    this.worldPosition = { x: 0, z: 0 };   // World position of target
+    this.onScreen = true;                  // Whether target is within player viewport
+    this.cameraAltitude = 80;              // Camera height for this cell's view
   }
 
   /**
@@ -103,6 +109,56 @@ export class VoronoiCell {
     this.camera.aspect = mainCamera.aspect;
     this.camera.near = mainCamera.near;
     this.camera.far = mainCamera.far;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /**
+   * Update camera to view a target at specified world position (Phase 2)
+   *
+   * IMPORTANT: This game uses a different coordinate system than the test HTML:
+   * - Terrain is a 2D plane in XY (not XZ)
+   * - Camera looks along Z axis toward negative Z (not along Y)
+   * - Terrain rotates around Z axis via pivotGroup.rotation.z
+   * - World coords: X = east, Y = north, Z = altitude (but camera Z is distance)
+   *
+   * The main camera sits at Z=600 looking at origin. The terrain group is positioned
+   * and rotated to show the correct view. For a target cell, we need to set up the
+   * camera to view a different world position as if it were at the screen center.
+   *
+   * @param {number} targetWorldX - Target world X position
+   * @param {number} targetWorldY - Target world Y position
+   * @param {number} cameraZ - Camera Z distance (same as main camera, e.g., 600)
+   * @param {number} playerHeading - Player heading in radians
+   * @param {number} playerX - Player world X (for relative positioning)
+   * @param {number} playerY - Player world Y (for relative positioning)
+   * @param {THREE.Camera} mainCamera - Optional main camera to copy FOV/near/far from
+   */
+  updateCameraForTarget(targetWorldX, targetWorldY, cameraZ, playerHeading, playerX, playerY, mainCamera = null) {
+    // Calculate offset from player to target in world coordinates
+    const offsetX = targetWorldX - playerX;
+    const offsetY = targetWorldY - playerY;
+
+    // Apply heading rotation to get screen-space offset
+    // Same rotation as terrain uses (pivotGroup.rotation.z = heading)
+    const cos = Math.cos(playerHeading);
+    const sin = Math.sin(playerHeading);
+    const screenOffsetX = offsetX * cos - offsetY * sin;
+    const screenOffsetY = offsetX * sin + offsetY * cos;
+
+    // Position camera offset from origin by the rotated amount
+    // The camera looks at its position minus Z, so we offset X and Y
+    this.camera.position.set(screenOffsetX, screenOffsetY, cameraZ);
+    this.camera.lookAt(screenOffsetX, screenOffsetY, 0);
+    this.camera.up.set(0, 1, 0);  // Y is up in screen space
+
+    // Copy FOV and clip planes from main camera if provided
+    if (mainCamera) {
+      this.camera.fov = mainCamera.fov;
+      this.camera.near = mainCamera.near;
+      this.camera.far = mainCamera.far;
+    }
+
+    this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
   }
 }

@@ -10,6 +10,7 @@ import * as THREE from 'three';
 import { Delaunay } from 'd3-delaunay';
 import { VoronoiCell } from './VoronoiCell.js';
 import { ViewportManager } from '../viewport/ViewportManager.js';
+import { CellBorderRenderer } from './CellBorderRenderer.js';
 
 export class VoronoiCellManager {
   /**
@@ -24,6 +25,9 @@ export class VoronoiCellManager {
 
     // Viewport manager handles all rendering
     this.viewportManager = new ViewportManager(renderer);
+
+    // Border renderer for cell boundaries
+    this.borderRenderer = new CellBorderRenderer();
 
     // Active cells
     this.cells = [];
@@ -108,6 +112,9 @@ export class VoronoiCellManager {
       const polygon = this.voronoi.cellPolygon(index);
       cell.updatePolygon(polygon);
     });
+
+    // Update border geometry
+    this.borderRenderer.updateFromCells(this.cells);
   }
 
   /**
@@ -142,11 +149,15 @@ export class VoronoiCellManager {
     } else {
       // Multi-cell path: use stencil masking via ViewportManager
       this._renderMultiCell();
+
+      // Render borders on top of all cells
+      this.borderRenderer.render(this.renderer);
     }
   }
 
   /**
    * Render multiple cells with stencil masking
+   * Uses two-phase rendering: write all masks first, then render all scenes
    * @private
    */
   _renderMultiCell() {
@@ -156,7 +167,14 @@ export class VoronoiCellManager {
     const playerCell = this.getPlayerCell();
     const exclusiveCells = this.cells.filter(c => c.type !== 'player');
 
-    // 1. Write ALL stencil masks first
+    // Debug logging (occasional)
+    if (Math.random() < 0.005) {
+      console.log('_renderMultiCell: player polygon:', playerCell?.polygon?.length,
+        'exclusive cells:', exclusiveCells.length,
+        exclusiveCells.map(c => ({ seed: c.seed, polyLen: c.polygon?.length })));
+    }
+
+    // Phase 1: Write ALL stencil masks first
     // Player/on-screen cells get ref=1
     if (playerCell && playerCell.polygon) {
       this.viewportManager.writeMask(playerCell.polygon, 1);
@@ -170,24 +188,62 @@ export class VoronoiCellManager {
       }
     }
 
-    // 2. Render player cell (ref=1)
+    // Phase 2: Render all scenes with stencil test
+
+    // 2a. Render player cell (ref=1) - NO viewport offset (centered)
     if (playerCell) {
-      this._renderCellWithStencil(playerCell, 1);
+      this._renderCellWithStencil(playerCell, 1, false);
     }
 
-    // 3. Render exclusive cells
+    // 2b. Render exclusive cells WITH viewport offset
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
-      this._renderCellWithStencil(cell, i + 2);
+      this._renderCellWithStencil(cell, i + 2, true);  // useViewportOffset = true
     }
   }
 
   /**
    * Render a single cell where stencil matches refValue
+   *
+   * For non-player cells, we use frustum shifting to achieve the seed alignment effect.
+   * This is more reliable than viewport offset because it doesn't clip at screen edges.
+   *
    * @private
+   * @param {VoronoiCell} cell - Cell to render
+   * @param {number} refValue - Stencil reference value
+   * @param {boolean} useFrustumShift - Whether to shift the frustum (false for player cell at center)
    */
-  _renderCellWithStencil(cell, refValue) {
+  _renderCellWithStencil(cell, refValue, useFrustumShift = false) {
     const gl = this.renderer.getContext();
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    // IMPORTANT: Disable scissor test and set full-screen viewport
+    this.renderer.setScissorTest(false);
+    gl.viewport(0, 0, screenW, screenH);
+
+    // Apply frustum shift for non-centered cells
+    // This shifts what the camera sees so the target appears at the seed position
+    if (useFrustumShift) {
+      // Calculate the NDC offset: how far the seed is from screen center
+      // Seed at center = (0,0) in NDC, seed at left edge = (-1, y)
+      const ndcOffsetX = (cell.seed.x / screenW) * 2 - 1;  // -1 to 1
+      const ndcOffsetY = 1 - (cell.seed.y / screenH) * 2;  // -1 to 1 (Y flipped)
+
+      // Apply asymmetric frustum by modifying the projection matrix
+      // This shifts the view without changing the viewport
+      cell.camera.aspect = screenW / screenH;
+      cell.camera.updateProjectionMatrix();
+
+      // Modify projection matrix to shift the frustum
+      // This is equivalent to: projMatrix * translateMatrix(-ndcOffsetX, -ndcOffsetY, 0)
+      const projMatrix = cell.camera.projectionMatrix;
+      projMatrix.elements[8] = -ndcOffsetX;   // Shift X in clip space
+      projMatrix.elements[9] = -ndcOffsetY;   // Shift Y in clip space
+    } else {
+      cell.camera.aspect = screenW / screenH;
+      cell.camera.updateProjectionMatrix();
+    }
 
     // Clear depth between cells
     gl.clear(gl.DEPTH_BUFFER_BIT);
@@ -225,5 +281,6 @@ export class VoronoiCellManager {
    */
   dispose() {
     this.viewportManager.dispose();
+    this.borderRenderer.dispose();
   }
 }

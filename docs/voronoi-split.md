@@ -1,5 +1,7 @@
 # Spec: Multi-Vertex Voronoi Split-Screen
 
+** DEPRECATED: This approach has been superseded by the better 'spec-voronoi-viewport-implementation.md' **
+
 **Goal:** A general-purpose split-screen system where one cell follows the player and zero or more cells show remote points of interest. Cell vertices encode bearing; cell boundaries encode distance.
 
 ---

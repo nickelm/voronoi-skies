@@ -42,6 +42,11 @@ export class ViewportManager {
    */
   clearBuffers() {
     const gl = this.gl;
+
+    // Reset viewport and scissor to full screen before clearing
+    this.renderer.setViewport(0, 0, this.screenW, this.screenH);
+    this.renderer.setScissorTest(false);
+
     gl.clearColor(
       this.backgroundColor.r,
       this.backgroundColor.g,
@@ -62,6 +67,10 @@ export class ViewportManager {
     if (!mask) return;
 
     const gl = this.gl;
+
+    // CRITICAL: Reset viewport and disable scissor for mask writing
+    this.renderer.setViewport(0, 0, this.screenW, this.screenH);
+    this.renderer.setScissorTest(false);
 
     // Configure stencil to write refValue wherever mask renders
     gl.enable(gl.STENCIL_TEST);
