@@ -4,6 +4,7 @@
  */
 
 import * as THREE from 'three';
+import { smoothstep } from '../utils/math.js';
 
 export class VoronoiCell {
   /**
@@ -35,7 +36,81 @@ export class VoronoiCell {
     this.target = null;                    // Reference to tracked entity
     this.worldPosition = { x: 0, z: 0 };   // World position of target
     this.onScreen = true;                  // Whether target is within player viewport
-    this.cameraAltitude = 80;              // Camera height for this cell's view
+
+    // Camera altitude/zoom properties
+    // terrainZ: actually stores CAMERA Z for this cell (legacy name)
+    // Terrain is FIXED at Z=0. Camera Z controls zoom level.
+    // Lower values = closer to terrain = zoomed in, Higher values = farther = zoomed out
+    this.terrainZ = null;                  // null means "use player's camera Z"
+
+    // Projected screen position (updated each frame for blending calculations)
+    this.projectedX = 0;
+    this.projectedY = 0;
+  }
+
+  /**
+   * Set the cell's independent camera Z (zoom level)
+   * Note: "terrainZ" is a legacy name - this actually sets CAMERA Z position.
+   * @param {number} cameraZ - Camera Z value (500 = close/zoomed in, higher = zoomed out)
+   */
+  setTerrainZ(cameraZ) {
+    this.terrainZ = cameraZ;
+  }
+
+  /**
+   * Set the cell's projected screen position (for blending calculations)
+   * @param {number} x - Screen X coordinate
+   * @param {number} y - Screen Y coordinate
+   */
+  setProjectedPosition(x, y) {
+    this.projectedX = x;
+    this.projectedY = y;
+  }
+
+  /**
+   * Calculate blended camera Z based on screen position
+   *
+   * When cell is on-screen: use player's camera Z (same zoom)
+   * When cell is off-screen: use cell's own camera Z (independent zoom)
+   * Transition uses smoothstep for smooth visual blending
+   *
+   * Note: "terrainZ" is a legacy name - this actually stores CAMERA Z position.
+   * The terrain is FIXED at Z=0. Camera Z controls zoom level.
+   *
+   * @param {number} playerCameraZ - Current player camera Z
+   * @param {number} visibilityMargin - Margin inside screen edge for "on-screen" (default 10)
+   * @param {number} blendMargin - Distance beyond screen edge for full cell altitude (default 100)
+   * @returns {number} Blended camera Z for this cell
+   */
+  getBlendedTerrainZ(playerCameraZ, visibilityMargin = 10, blendMargin = 100) {
+    // If no independent camera Z set, always use player's
+    if (this.terrainZ === null) {
+      return playerCameraZ;
+    }
+
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    // Calculate distance to nearest screen edge (positive = inside, negative = outside)
+    const distToLeft = this.projectedX;
+    const distToRight = screenW - this.projectedX;
+    const distToTop = this.projectedY;
+    const distToBottom = screenH - this.projectedY;
+    const minDistToEdge = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+
+    // If well inside screen, use player's camera Z
+    if (minDistToEdge > visibilityMargin) {
+      return playerCameraZ;
+    }
+
+    // If well outside screen, use cell's own camera Z
+    if (minDistToEdge < -blendMargin) {
+      return this.terrainZ;
+    }
+
+    // In transition zone: smoothstep blend
+    const t = smoothstep(-blendMargin, visibilityMargin, minDistToEdge);
+    return this.terrainZ + t * (playerCameraZ - this.terrainZ);
   }
 
   /**
@@ -73,6 +148,31 @@ export class VoronoiCell {
       width: Math.ceil(maxX - minX),
       height: Math.ceil(maxY - minY)
     };
+  }
+
+  /**
+   * Check if a screen point is inside this cell's polygon
+   * Uses ray casting algorithm for point-in-polygon test
+   * @param {number} x - Screen X coordinate
+   * @param {number} y - Screen Y coordinate
+   * @returns {boolean} True if point is inside polygon
+   */
+  containsPoint(x, y) {
+    if (!this.polygon || this.polygon.length < 3) return false;
+
+    let inside = false;
+    const n = this.polygon.length;
+
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = this.polygon[i][0], yi = this.polygon[i][1];
+      const xj = this.polygon[j][0], yj = this.polygon[j][1];
+
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+
+    return inside;
   }
 
   /**

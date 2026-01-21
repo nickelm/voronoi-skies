@@ -18,25 +18,21 @@ let composer = null;
 let blurPass = null;
 
 // Camera configuration
-const CAMERA_Z = 600;           // Camera distance from origin
 const CAMERA_FOV = 60;          // Field of view in degrees
+const TERRAIN_Z = 0;            // Terrain is FIXED at Z=0
 
-// Altitude to terrain Z mapping
-// We want dramatic scaling: at ground level terrain is close, at high altitude it's far
-// Using a much stronger scale factor
+// Altitude to camera Z mapping
+// Terrain stays fixed at Z=0, camera moves along Z to control zoom
 const MIN_ALTITUDE = 100;       // Ground level
 const MAX_ALTITUDE = 40000;     // Service ceiling
 
-// Terrain Z range: close to camera at ground level, far at high altitude
-// At ground level (100ft): terrain at Z = 200 (close, appears large)
-// At cruise (10000ft): terrain at Z = -200 (medium)
-// At ceiling (40000ft): terrain at Z = -600 (far, appears small)
-const TERRAIN_Z_CLOSE = 100;    // Z when at ground level
-const TERRAIN_Z_FAR = -15000;     // Z when at max altitude
+// Camera Z range: close at ground level, far at high altitude
+const CAMERA_Z_CLOSE = 500;     // Camera Z at ground level (close = zoomed in)
+const CAMERA_Z_FAR = 15600;     // Camera Z at max altitude (far = zoomed out)
 
 // Smooth transition state
-let currentTerrainZ = 0;
-const TERRAIN_Z_LERP_SPEED = 5.0;
+let currentCameraZ = CAMERA_Z_CLOSE;
+const CAMERA_Z_LERP_SPEED = 5.0;
 
 export function init(container) {
   // Create scene
@@ -44,10 +40,12 @@ export function init(container) {
   scene.background = null;  // Prevent auto-clearing during multi-pass stencil rendering
 
   // Set up perspective camera for altitude effect
-  // Far plane must accommodate terrain at max altitude (Z = -15000 from camera at Z = 600)
+  // Far plane must accommodate camera at max distance
   const aspect = window.innerWidth / window.innerHeight;
   camera = new THREE.PerspectiveCamera(CAMERA_FOV, aspect, 1, 20000);
-  camera.position.z = CAMERA_Z;
+  camera.position.z = currentCameraZ;
+  camera.lookAt(0, 0, 0);  // Explicit: look at origin
+  camera.up.set(0, 1, 0);  // Explicit: Y-up orientation
 
   // Create WebGL renderer with stencil buffer for Voronoi cell masking
   renderer = new THREE.WebGLRenderer({
@@ -85,36 +83,49 @@ function onWindowResize() {
 }
 
 /**
- * Calculate terrain Z position based on altitude
- * Higher altitude = more negative Z = further from camera = appears smaller
+ * Calculate camera Z position based on altitude
+ * Higher altitude = higher Z = camera further from terrain = zoomed out
  */
-function getTerrainZForAltitude(altitude) {
+function getCameraZForAltitude(altitude) {
   // Clamp altitude to valid range
   const clampedAlt = Math.max(MIN_ALTITUDE, Math.min(MAX_ALTITUDE, altitude));
 
   // Linear interpolation from close (ground) to far (ceiling)
   const t = (clampedAlt - MIN_ALTITUDE) / (MAX_ALTITUDE - MIN_ALTITUDE);
-  return TERRAIN_Z_CLOSE + t * (TERRAIN_Z_FAR - TERRAIN_Z_CLOSE);
+  return CAMERA_Z_CLOSE + t * (CAMERA_Z_FAR - CAMERA_Z_CLOSE);
 }
 
 /**
- * Update terrain Z position based on altitude with smooth interpolation
- * Returns the current terrain Z for positioning terrain group
+ * Update camera Z position based on altitude with smooth interpolation
+ * Moves the CAMERA, terrain stays fixed at Z=0.
+ * Returns the current camera Z.
  */
 export function updateAltitudeZoom(altitude, deltaTime) {
-  const targetZ = getTerrainZForAltitude(altitude);
+  const targetZ = getCameraZForAltitude(altitude);
 
   // Smooth interpolation to prevent jarring changes
-  currentTerrainZ += (targetZ - currentTerrainZ) * Math.min(1, deltaTime * TERRAIN_Z_LERP_SPEED);
+  currentCameraZ += (targetZ - currentCameraZ) * Math.min(1, deltaTime * CAMERA_Z_LERP_SPEED);
 
-  return currentTerrainZ;
+  // Update the main camera position
+  if (camera) {
+    camera.position.z = currentCameraZ;
+  }
+
+  return currentCameraZ;
 }
 
 /**
- * Get the camera Z position (needed for aircraft positioning)
+ * Get the current camera Z position (changes with altitude)
  */
 export function getCameraZ() {
-  return CAMERA_Z;
+  return currentCameraZ;
+}
+
+/**
+ * Get the fixed terrain Z position (always 0)
+ */
+export function getTerrainZ() {
+  return TERRAIN_Z;
 }
 
 export function render() {

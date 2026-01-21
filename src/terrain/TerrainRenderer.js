@@ -137,25 +137,26 @@ export class TerrainRenderer {
 
   /**
    * Update terrain group transform to match player state
-   * With perspective camera, terrain Z position controls apparent size
+   * Terrain is FIXED at Z=0. Camera Z controls zoom (altitude effect).
    * @param {number} playerX - Player world X
    * @param {number} playerY - Player world Y
    * @param {number} heading - Player heading in radians (0 = up/north)
-   * @param {number} terrainZ - Z position for terrain (from altitude calculation)
+   * @param {number} terrainZ - Z position for terrain (always 0, kept for compatibility)
    * @param {number} aircraftScreenY - Aircraft's Y position in 3D space
    * @param {number} aircraftZ - Aircraft's Z position
-   * @param {number} cameraZ - Camera's Z position
+   * @param {number} cameraZ - Camera's Z position (changes with altitude)
    */
   updateTransform(playerX, playerY, heading, terrainZ = 0, aircraftScreenY = -35, aircraftZ = 500, cameraZ = 600) {
     // With perspective, we need to scale the pivot Y so terrain appears to rotate
     // around the aircraft's screen position. The formula accounts for perspective:
     // pivotY = aircraftY * (cameraZ - terrainZ) / (cameraZ - aircraftZ)
+    // Note: terrainZ is always 0, cameraZ changes with altitude
     const perspectiveScale = (cameraZ - terrainZ) / (cameraZ - aircraftZ);
     const pivotY = aircraftScreenY * perspectiveScale;
 
-    // Update pivot position
+    // Update pivot position - terrain FIXED at Z=0
     this.pivotGroup.position.y = pivotY;
-    this.pivotGroup.position.z = terrainZ;
+    this.pivotGroup.position.z = terrainZ;  // Always 0
 
     // Rotate pivot around aircraft's screen position
     // Heading convention: 0 = north (+Y), increases clockwise
@@ -165,5 +166,17 @@ export class TerrainRenderer {
 
     // Translate terrain within pivot so player world position is at pivot origin
     this.terrainGroup.position.set(-playerX, -playerY, 0);
+
+    // Store for external access
+    this.currentPivotY = pivotY;
+  }
+
+  /**
+   * Get the current pivot Y offset
+   * Used by target cameras to correctly position above terrain
+   * @returns {number} Current pivot Y offset
+   */
+  getPivotY() {
+    return this.currentPivotY || 0;
   }
 }

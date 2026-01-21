@@ -99,6 +99,21 @@ export class VoronoiCellManager {
   }
 
   /**
+   * Find which cell contains the given screen coordinates
+   * @param {number} x - Screen X coordinate
+   * @param {number} y - Screen Y coordinate
+   * @returns {VoronoiCell|null} The cell containing the point, or null
+   */
+  getCellAtPoint(x, y) {
+    for (const cell of this.cells) {
+      if (cell.containsPoint(x, y)) {
+        return cell;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Compute Voronoi tessellation from cell seeds
    */
   computeVoronoi() {

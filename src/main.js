@@ -24,7 +24,8 @@ let airbaseRegistry = null;
 let airbaseRenderer = null;
 let lastTime = 0;
 let debugElement = null;
-let currentTerrainZ = 0;
+let currentCameraZ = 500;  // Main camera Z (changes with altitude)
+const TERRAIN_Z = 0;       // Terrain is FIXED at Z=0
 
 // Phase 2 Test Targets - Multiple targets at fixed world positions
 const MAX_TARGETS = 5;
@@ -34,7 +35,7 @@ const testTargets = [];  // Array of target objects
 let nextTargetId = 0;    // Incrementing ID for deterministic ordering
 
 const SCREEN_INSET = 30;
-const VISIBILITY_MARGIN = 10;  // Small margin - split only when truly off-screen
+const VISIBILITY_MARGIN = 50;  // Margin for on-screen detection (matches reference test)
 const MIN_SEED_DISTANCE = 40;  // Minimum distance between seeds for deconfliction
 
 // Three.js lighting
@@ -300,6 +301,42 @@ function initLightingControls() {
       console.log(`Light: AZ=${LightingConfig.azimuth}° EL=${LightingConfig.elevation}° INT=${LightingConfig.intensity.toFixed(2)} AMB=${LightingConfig.ambient.toFixed(2)}`);
     }
   });
+
+  // Mouse wheel handler for cell altitude control
+  window.addEventListener('wheel', (e) => {
+    if (!voronoiCellManager) return;
+
+    // Find which cell the mouse is over
+    const cell = voronoiCellManager.getCellAtPoint(e.clientX, e.clientY);
+    if (!cell) return;
+
+    // Only allow altitude adjustment for non-player cells
+    if (cell.type === 'player') return;
+
+    // Initialize terrainZ if not set (use current player camera Z)
+    if (cell.terrainZ === null) {
+      cell.terrainZ = renderer.getCameraZ();
+    }
+
+    // Adjust altitude based on scroll direction
+    // Scroll up (negative deltaY) = zoom in = decrease camera Z
+    // Scroll down (positive deltaY) = zoom out = increase camera Z
+    const ZOOM_SPEED = 200;
+    const MIN_CAMERA_Z = 500;
+    const MAX_CAMERA_Z = 15600;
+
+    const delta = e.deltaY > 0 ? ZOOM_SPEED : -ZOOM_SPEED;
+    cell.terrainZ = Math.max(MIN_CAMERA_Z, Math.min(MAX_CAMERA_Z, cell.terrainZ + delta));
+
+    // Prevent page scroll
+    e.preventDefault();
+
+    // Find the associated target for logging
+    const target = testTargets.find(t => t.cell === cell);
+    if (target) {
+      console.log(`${target.name} camera Z: ${cell.terrainZ.toFixed(0)}`);
+    }
+  }, { passive: false });
 }
 
 /**
@@ -360,11 +397,64 @@ function syncLightsToConfig(skyColor = null) {
 // ============================================
 
 /**
+ * Check if a target is visible within the main camera's view of the terrain.
+ *
+ * Instead of projecting to screen and checking bounds, we calculate the visible
+ * terrain rectangle from the camera's frustum and check if the target is inside.
+ * This is more accurate because it works in world coordinates.
+ *
+ * @param {number} worldX - Target world X position
+ * @param {number} worldY - Target world Y position
+ * @param {number} playerX - Player world X
+ * @param {number} playerY - Player world Y
+ * @param {number} playerHeading - Player heading in radians
+ * @returns {boolean} True if target is visible on screen
+ */
+function isTargetVisible(worldX, worldY, playerX, playerY, playerHeading) {
+  const mainCamera = renderer.getCamera();
+  const cameraZ = renderer.getCameraZ();
+
+  // Calculate visible terrain dimensions at Z=0
+  // Using camera FOV and distance to terrain
+  const fovRad = mainCamera.fov * Math.PI / 180;
+  const aspect = mainCamera.aspect;
+
+  // Half-height and half-width of visible terrain at Z=0
+  // Camera is at Z=cameraZ looking at Z=0, so distance = cameraZ
+  const halfHeight = Math.tan(fovRad / 2) * cameraZ;
+  const halfWidth = halfHeight * aspect;
+
+  // Apply margin (as fraction of visible area, not pixels)
+  const marginFraction = 0.1;  // 10% margin on each side
+  const visibleHalfWidth = halfWidth * (1 - marginFraction);
+  const visibleHalfHeight = halfHeight * (1 - marginFraction);
+
+  // Get offset from player to target in world coordinates
+  const offsetX = worldX - playerX;
+  const offsetY = worldY - playerY;
+
+  // Rotate by player heading to get offset in camera/screen space
+  // After rotation: +X is right on screen, +Y is up on screen (toward top)
+  const cos = Math.cos(playerHeading);
+  const sin = Math.sin(playerHeading);
+  const rotatedX = offsetX * cos - offsetY * sin;
+  const rotatedY = offsetX * sin + offsetY * cos;
+
+  // Check if rotated position is within visible rectangle
+  // Note: pivotY affects where the center of the view is, but for visibility
+  // we care about the offset from player position, which is at screen center
+  const visible = Math.abs(rotatedX) <= visibleHalfWidth &&
+                  Math.abs(rotatedY) <= visibleHalfHeight;
+
+  return visible;
+}
+
+/**
  * Project a world position to screen coordinates
  *
  * This game's coordinate system:
  * - World: X = east, Y = north (2D plane)
- * - Screen: Camera at Z=600 looking at origin along -Z
+ * - Screen: Camera at Z=cameraZ looking at origin along -Z
  * - Terrain rotates around Z axis by player heading
  * - The pivotGroup applies: rotation.z = heading, then terrainGroup offset = -playerPos
  *
@@ -378,7 +468,7 @@ function syncLightsToConfig(skyColor = null) {
  * @param {number} playerX - Player world X
  * @param {number} playerY - Player world Y
  * @param {number} playerHeading - Player heading in radians
- * @returns {{x: number, y: number, visible: boolean}}
+ * @returns {{x: number, y: number}}
  */
 function projectToScreen(worldX, worldY, playerX, playerY, playerHeading) {
   const mainCamera = renderer.getCamera();
@@ -395,21 +485,21 @@ function projectToScreen(worldX, worldY, playerX, playerY, playerHeading) {
   const rotatedX = offsetX * cos - offsetY * sin;
   const rotatedY = offsetX * sin + offsetY * cos;
 
-  // Create point in camera space (terrain is at Z=0 relative to where camera looks)
-  // But we need to account for terrain Z position which varies with altitude
-  const point = new THREE.Vector3(rotatedX, rotatedY, currentTerrainZ);
-  const projected = point.project(mainCamera);
+  // Calculate visible terrain dimensions (same as isTargetVisible)
+  const cameraZ = renderer.getCameraZ();
+  const fovRad = mainCamera.fov * Math.PI / 180;
+  const aspect = mainCamera.aspect;
+  const halfHeight = Math.tan(fovRad / 2) * cameraZ;
+  const halfWidth = halfHeight * aspect;
 
-  const screenX = (projected.x + 1) / 2 * screenW;
-  const screenY = (1 - projected.y) / 2 * screenH;
+  // Map from world-space offset to screen coordinates
+  // Player is at screen center, rotatedX/rotatedY is offset from player
+  // World range [-halfWidth, +halfWidth] maps to screen [0, screenW]
+  // World range [-halfHeight, +halfHeight] maps to screen [screenH, 0] (Y inverted)
+  const screenX = screenW / 2 + (rotatedX / halfWidth) * (screenW / 2);
+  const screenY = screenH / 2 - (rotatedY / halfHeight) * (screenH / 2);
 
-  const visible = screenX >= VISIBILITY_MARGIN &&
-                  screenX <= screenW - VISIBILITY_MARGIN &&
-                  screenY >= VISIBILITY_MARGIN &&
-                  screenY <= screenH - VISIBILITY_MARGIN &&
-                  projected.z > 0 && projected.z < 1;
-
-  return { x: screenX, y: screenY, visible };
+  return { x: screenX, y: screenY };
 }
 
 /**
@@ -522,14 +612,16 @@ function updateTestTargets() {
   const offScreenTargets = [];
 
   for (const target of testTargets) {
-    // Project to screen to determine if on-screen or off-screen
+    // Check visibility using world-space frustum intersection
+    target.onScreen = isTargetVisible(target.worldX, target.worldY, player.x, player.y, player.heading);
+
+    // Project to screen for seed positioning (same projection for all targets)
     const projected = projectToScreen(target.worldX, target.worldY, player.x, player.y, player.heading);
-    target.onScreen = projected.visible;
     target.projectedX = projected.x;
     target.projectedY = projected.y;
 
     if (target.onScreen) {
-      // ON-SCREEN: seed at actual screen position to protect screen space
+      // ON-SCREEN: seed at projected screen position
       target.seedX = projected.x;
       target.seedY = projected.y;
     } else {
@@ -560,6 +652,8 @@ function updateTestTargets() {
     if (!target.cell || !voronoiCellManager.cells.includes(target.cell)) {
       target.cell = voronoiCellManager.addCell('target');
       target.cell.target = target;
+      // Set the cell's independent terrain Z from the target's initial value
+      target.cell.setTerrainZ(target.initialCameraZ);
     }
 
     // Update seed position (all targets have seeds)
@@ -567,29 +661,37 @@ function updateTestTargets() {
     target.cell.seed.y = target.seedY;
     target.cell.onScreen = target.onScreen;
 
+    // Update cell's projected position for blending calculations
+    target.cell.setProjectedPosition(target.projectedX, target.projectedY);
+
     if (!target.onScreen) {
       // OFF-SCREEN: update target camera for exclusive rendering
-      const offsetX = target.worldX - player.x;
-      const offsetY = target.worldY - player.y;
+      //
+      // The target marker is in the terrainGroup. Get its actual world position
+      // after all terrain transforms have been applied.
+      const markerWorldPos = new THREE.Vector3();
+      target.marker.getWorldPosition(markerWorldPos);
 
-      // Apply heading rotation (same as pivotGroup.rotation.z)
-      const cos = Math.cos(player.heading);
-      const sin = Math.sin(player.heading);
-      const rotatedX = offsetX * cos - offsetY * sin;
-      const rotatedY = offsetX * sin + offsetY * cos;
-
-      // Position target camera at the rotated offset from origin
       const mainCamera = renderer.getCamera();
       const cameraZ = renderer.getCameraZ();
 
-      target.cell.camera.position.set(rotatedX, rotatedY, cameraZ);
-      target.cell.camera.lookAt(rotatedX, rotatedY, currentTerrainZ);
+      // Get blended camera Z from the cell (handles smoothstep transition)
+      const blendedCameraZ = target.cell.getBlendedTerrainZ(cameraZ, VISIBILITY_MARGIN);
+
+      // Position camera directly above the marker's world position
+      target.cell.camera.position.set(markerWorldPos.x, markerWorldPos.y, blendedCameraZ);
+      target.cell.camera.lookAt(markerWorldPos.x, markerWorldPos.y, TERRAIN_Z);
       target.cell.camera.up.set(0, 1, 0);
       target.cell.camera.fov = mainCamera.fov;
       target.cell.camera.aspect = screenW / screenH;
       target.cell.camera.near = mainCamera.near;
       target.cell.camera.far = mainCamera.far;
       target.cell.camera.updateProjectionMatrix();
+
+      // Debug: log camera position occasionally
+      if (Math.random() < 0.005) {
+        console.log(`${target.name} camera at (${markerWorldPos.x.toFixed(0)}, ${markerWorldPos.y.toFixed(0)}, ${blendedCameraZ.toFixed(0)})`);
+      }
     }
     // ON-SCREEN targets don't need camera updates - they render with player camera
   }
@@ -597,6 +699,28 @@ function updateTestTargets() {
   // Always recompute Voronoi since all targets have seeds
   if (testTargets.length > 0) {
     voronoiCellManager.computeVoronoi();
+  }
+
+  // Debug: log Voronoi seeds every 5 frames
+  if (!window._voronoiDebugFrame) window._voronoiDebugFrame = 0;
+  window._voronoiDebugFrame++;
+  if (window._voronoiDebugFrame % 5 === 0 && testTargets.length > 0) {
+    const playerCell = voronoiCellManager.getPlayerCell();
+    const allCells = voronoiCellManager.cells;
+
+    console.log(`=== VORONOI SEEDS (frame ${window._voronoiDebugFrame}) ===`);
+    console.log(`Total cells: ${allCells.length}`);
+
+    for (const cell of allCells) {
+      if (cell.type === 'player') {
+        console.log(`  PLAYER: seed=(${cell.seed.x.toFixed(0)}, ${cell.seed.y.toFixed(0)})`);
+      } else {
+        const target = testTargets.find(t => t.cell === cell);
+        const name = target ? target.name : 'unknown';
+        const status = cell.onScreen ? 'ON-SCREEN' : 'OFF-SCREEN';
+        console.log(`  ${name} [${status}]: seed=(${cell.seed.x.toFixed(0)}, ${cell.seed.y.toFixed(0)})`);
+      }
+    }
   }
 }
 
@@ -614,6 +738,7 @@ function dropTarget() {
   const targetId = nextTargetId++;
 
   // Create target object
+  // terrainZ will be set on the VoronoiCell, not on the target itself
   const target = {
     id: targetId,
     worldX: player.x,  // Drop at current position (not ahead)
@@ -621,9 +746,13 @@ function dropTarget() {
     name: TARGET_NAMES[targetIndex],
     color: TARGET_COLORS[targetIndex],
     marker: null,
-    cell: null,        // Will be set when off-screen
+    cell: null,        // VoronoiCell will be created on first update
     onScreen: true
   };
+
+  // Initialize camera Z to current player camera Z (same altitude as aircraft when dropped)
+  // Can be adjusted via mouse wheel when hovering over the cell
+  target.initialCameraZ = renderer.getCameraZ();
 
   // Create debug marker - a bright box visible in the terrain
   const markerGeometry = new THREE.BoxGeometry(50, 50, 50);
@@ -635,7 +764,7 @@ function dropTarget() {
 
   testTargets.push(target);
 
-  console.log(`Target ${target.name} dropped at (${target.worldX.toFixed(0)}, ${target.worldY.toFixed(0)}) [${testTargets.length}/${MAX_TARGETS}]`);
+  console.log(`Target ${target.name} dropped at (${target.worldX.toFixed(0)}, ${target.worldY.toFixed(0)}) cameraZ:${target.initialCameraZ.toFixed(0)} [${testTargets.length}/${MAX_TARGETS}]`);
 }
 
 /**
@@ -700,18 +829,26 @@ function update(deltaTime) {
     airbaseRenderer.updatePAPILights(player.x, player.y, player.altitude);
   }
 
-  // Update terrain Z position based on altitude (returns current terrain Z)
-  // Higher altitude = more negative Z = terrain further from camera = appears smaller
-  currentTerrainZ = renderer.updateAltitudeZoom(player.altitude, deltaTime);
+  // Update camera Z position based on altitude (camera moves, terrain FIXED at Z=0)
+  // Higher altitude = higher camera Z = camera further from terrain = zoomed out
+  currentCameraZ = renderer.updateAltitudeZoom(player.altitude, deltaTime);
 
-  // Update shadow Z to match terrain position
-  player.updateShadowZ(currentTerrainZ);
-
-  // Update terrain transform with perspective-correct positioning
+  // Update terrain transform FIRST - this computes pivotY which other systems need
+  // Terrain is FIXED at TERRAIN_Z=0, camera moves with altitude
   const aircraftScreenY = player.getScreenY();
-  const aircraftZ = player.screenZ;
-  const cameraZ = renderer.getCameraZ();
-  terrainRenderer.updateTransform(player.x, player.y, player.heading, currentTerrainZ, aircraftScreenY, aircraftZ, cameraZ);
+  // For terrain transform, use previous frame's aircraftZ initially, then update
+  const prevAircraftZ = player.screenZ;
+  terrainRenderer.updateTransform(player.x, player.y, player.heading, TERRAIN_Z, aircraftScreenY, prevAircraftZ, currentCameraZ);
+
+  // Now get pivotY (computed by updateTransform)
+  const pivotY = terrainRenderer.getPivotY();
+
+  // Update aircraft mesh Z to stay between camera and terrain
+  // Also pass pivotY so aircraft Y matches terrain position
+  player.updateMeshZ(currentCameraZ, TERRAIN_Z, pivotY);
+
+  // Update shadow position (computed in world coordinates)
+  player.updateShadowZ(TERRAIN_Z);
 
   // Update terrain blur based on altitude (currently disabled)
   renderer.updateBlur(player.altitude);
@@ -787,7 +924,7 @@ function updateDebug(deltaTime) {
       `ALT: ${Math.round(player.altitude)}ft`,
       `THR: ${Math.round(player.throttle * 100)}%`,
       `SPD: ${Math.round(player.speed)}`,
-      `TZ: ${currentTerrainZ.toFixed(0)}`,
+      `CAM_Z: ${currentCameraZ.toFixed(0)}`,
       `CHUNK: ${chunkX},${chunkY}`,
       `ACTIVE: ${chunkManager.getActiveChunkCount()}`,
       `QUEUE: ${chunkManager.getQueuedChunkCount()}`,

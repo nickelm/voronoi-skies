@@ -223,6 +223,25 @@ export class Aircraft {
   }
 
   /**
+   * Update aircraft mesh Z position to stay between camera and terrain
+   * With camera-moving architecture, aircraft must be positioned relative to camera
+   * @param {number} cameraZ - Current camera Z position
+   * @param {number} terrainZ - Fixed terrain Z position (always 0)
+   */
+  updateMeshZ(cameraZ, terrainZ = 0, pivotY = 0) {
+    // Aircraft should be between camera and terrain, but closer to camera
+    // to appear at a consistent size on screen
+    // Position at 80% of the way from terrain to camera
+    const aircraftZ = terrainZ + (cameraZ - terrainZ) * 0.8;
+    this.mesh.position.z = aircraftZ;
+    this.screenZ = aircraftZ;
+    this.cameraZ = cameraZ;
+
+    // Aircraft Y should match the terrain pivot Y so it appears centered
+    this.mesh.position.y = pivotY;
+  }
+
+  /**
    * Get aircraft screen Y position (for terrain pivot alignment)
    */
   getScreenY() {
