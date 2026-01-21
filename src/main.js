@@ -11,6 +11,7 @@ import { ChunkManager } from './terrain/ChunkManager.js';
 import { LightingConfig, applyTimePreset } from './terrain/lighting.js';
 import { VoronoiCellManager } from './voronoi/VoronoiCellManager.js';
 import { AirbaseCellController } from './voronoi/AirbaseCellController.js';
+import { UiCellManager } from './ui/UiCellManager.js';
 import { initNoise } from './terrain/noise.js';
 import { AirbaseRegistry, AirbaseRenderer } from './airbase/index.js';
 
@@ -20,6 +21,7 @@ let terrainRenderer = null;
 let chunkManager = null;
 let voronoiCellManager = null;
 let airbaseCellController = null;
+let uiCellManager = null;
 let airbaseRegistry = null;
 let airbaseRenderer = null;
 let lastTime = 0;
@@ -136,6 +138,11 @@ function init() {
 
   // Initialize airbase cell controller for dynamic airbase cells
   airbaseCellController = new AirbaseCellController(airbaseRegistry, voronoiCellManager);
+
+  // Initialize UI cell manager for 2D orthographic UI cells
+  uiCellManager = new UiCellManager(voronoiCellManager);
+  // Register a test UI cell at bottom-right (90% x, 85% y)
+  uiCellManager.registerUiCell('test-ui', 0.9, 0.85, 'test');
 
   // Start game loop
   lastTime = performance.now();
@@ -299,6 +306,16 @@ function initLightingControls() {
         } else {
           // 9: Drop new target at current position
           dropTarget();
+        }
+        break;
+
+      // UI Cell Toggle
+      case 'Digit0':
+        if (uiCellManager) {
+          const uiCellData = uiCellManager.uiCells.get('test-ui');
+          if (uiCellData) {
+            uiCellManager.setEnabled('test-ui', !uiCellData.enabled);
+          }
         }
         break;
     }
@@ -556,8 +573,10 @@ function rayToScreenEdge(targetX, targetY, screenW, screenH) {
 }
 
 /**
- * Deconflict off-screen target seeds that are too close together
+ * Deconflict off-screen target seeds that are too close together or to UI cells
  * Uses deterministic ordering by target ID to prevent flicker
+ *
+ * UI cell seeds are immovable - targets must move away from them
  *
  * @param {Array} offScreenTargets - Array of targets with their computed seed positions
  */
@@ -567,6 +586,31 @@ function deconflictSeeds(offScreenTargets) {
   const cx = screenW / 2;
   const cy = screenH / 2;
 
+  // Get UI cell seeds (these are immovable)
+  const uiSeeds = uiCellManager ? uiCellManager.getActiveUiSeeds() : [];
+
+  // First: push targets away from UI cell seeds (UI seeds are immovable)
+  // Each UI seed has its own configurable deconfliction radius
+  for (const target of offScreenTargets) {
+    for (const uiSeed of uiSeeds) {
+      const dist = Math.hypot(target.seedX - uiSeed.x, target.seedY - uiSeed.y);
+      // Use the UI cell's configured radius, or fall back to MIN_SEED_DISTANCE
+      const minDist = uiSeed.radius || MIN_SEED_DISTANCE;
+      if (dist < minDist) {
+        // Calculate direction from UI seed to target
+        const dx = target.seedX - uiSeed.x;
+        const dy = target.seedY - uiSeed.y;
+        const len = Math.hypot(dx, dy) || 1;
+
+        // Push target away from UI seed
+        const pushDist = minDist - dist + 5;
+        target.seedX += (dx / len) * pushDist;
+        target.seedY += (dy / len) * pushDist;
+      }
+    }
+  }
+
+  // Then: deconflict targets against each other
   for (const target of offScreenTargets) {
     for (const other of offScreenTargets) {
       if (target === other) continue;
@@ -707,27 +751,6 @@ function updateTestTargets() {
     voronoiCellManager.computeVoronoi();
   }
 
-  // Debug: log Voronoi seeds every 5 frames
-  if (!window._voronoiDebugFrame) window._voronoiDebugFrame = 0;
-  window._voronoiDebugFrame++;
-  if (window._voronoiDebugFrame % 5 === 0 && testTargets.length > 0) {
-    const playerCell = voronoiCellManager.getPlayerCell();
-    const allCells = voronoiCellManager.cells;
-
-    console.log(`=== VORONOI SEEDS (frame ${window._voronoiDebugFrame}) ===`);
-    console.log(`Total cells: ${allCells.length}`);
-
-    for (const cell of allCells) {
-      if (cell.type === 'player') {
-        console.log(`  PLAYER: seed=(${cell.seed.x.toFixed(0)}, ${cell.seed.y.toFixed(0)})`);
-      } else {
-        const target = testTargets.find(t => t.cell === cell);
-        const name = target ? target.name : 'unknown';
-        const status = cell.onScreen ? 'ON-SCREEN' : 'OFF-SCREEN';
-        console.log(`  ${name} [${status}]: seed=(${cell.seed.x.toFixed(0)}, ${cell.seed.y.toFixed(0)})`);
-      }
-    }
-  }
 }
 
 /**

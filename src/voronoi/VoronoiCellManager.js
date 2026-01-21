@@ -58,8 +58,6 @@ export class VoronoiCellManager {
 
     this.cells = [playerCell];
     this.computeVoronoi();
-
-    console.log('VoronoiCellManager: Initialized player cell at screen center');
   }
 
   /**
@@ -72,7 +70,6 @@ export class VoronoiCellManager {
     const cell = new VoronoiCell({ id, type });
     this.cells.push(cell);
     this.computeVoronoi();
-    console.log(`VoronoiCellManager: Added ${type} cell (id=${id})`);
     return cell;
   }
 
@@ -86,7 +83,6 @@ export class VoronoiCellManager {
       this.cells.splice(index, 1);
       this.cells.forEach((c, i) => c.id = i);
       this.computeVoronoi();
-      console.log(`VoronoiCellManager: Removed cell, ${this.cells.length} cells remaining`);
     }
   }
 
@@ -188,13 +184,6 @@ export class VoronoiCellManager {
     const onScreenCells = this.cells.filter(c => c.type === 'player' || c.onScreen === true);
     const exclusiveCells = this.cells.filter(c => c.type !== 'player' && c.onScreen === false);
 
-    // Debug logging (occasional)
-    if (Math.random() < 0.005) {
-      console.log('_renderMultiCell: on-screen cells:', onScreenCells.length,
-        'exclusive cells:', exclusiveCells.length,
-        exclusiveCells.map(c => ({ seed: c.seed, polyLen: c.polygon?.length, onScreen: c.onScreen })));
-    }
-
     // Phase 1: Write ALL stencil masks first
 
     // On-screen cells (player + visible targets) all get ref=1 - they merge
@@ -219,10 +208,18 @@ export class VoronoiCellManager {
       this._renderCellWithStencil(playerCell, 1, false);
     }
 
-    // 2b. Render exclusive off-screen cells WITH frustum shift
+    // 2b. Render exclusive cells with type-specific rendering
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
-      this._renderCellWithStencil(cell, i + 2, true);
+      const refValue = i + 2;
+
+      if (cell.type === 'ui') {
+        // 2D UI cells use orthographic rendering with frustum adjustment
+        this._renderUiCell(cell, refValue);
+      } else {
+        // 3D target cells use perspective rendering with frustum shift
+        this._renderCellWithStencil(cell, refValue, true);
+      }
     }
   }
 
@@ -280,6 +277,48 @@ export class VoronoiCellManager {
 
     // Render with cell's camera
     this.renderer.render(this.scene, cell.camera);
+
+    gl.disable(gl.STENCIL_TEST);
+  }
+
+  /**
+   * Render a 2D UI cell with orthographic projection
+   *
+   * UI cells use a different rendering technique than 3D cells:
+   * - Orthographic camera (not perspective)
+   * - Frustum adjustment instead of frustum shift (camera.left/right/top/bottom)
+   * - Each UI cell has its own dedicated scene
+   * - Full viewport, stencil alone handles clipping
+   *
+   * @private
+   * @param {VoronoiCell} cell - UI cell to render
+   * @param {number} refValue - Stencil reference value
+   */
+  _renderUiCell(cell, refValue) {
+    const gl = this.renderer.getContext();
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    // Standard viewport (no offset for orthographic)
+    this.renderer.setScissorTest(false);
+    gl.viewport(0, 0, screenW, screenH);
+
+    // Adjust orthographic camera frustum to center on seed position
+    cell.updateOrthographicFrustum();
+
+    // Clear depth for this cell
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+
+    // Configure stencil test
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    gl.stencilMask(0x00);
+
+    // Render UI scene (NOT the shared world scene)
+    if (cell.scene) {
+      this.renderer.render(cell.scene, cell.camera);
+    }
 
     gl.disable(gl.STENCIL_TEST);
   }

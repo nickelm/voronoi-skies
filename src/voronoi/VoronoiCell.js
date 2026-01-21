@@ -10,7 +10,9 @@ export class VoronoiCell {
   /**
    * @param {Object} config
    * @param {number} config.id - Unique cell identifier
-   * @param {string} config.type - Cell type: 'player' | 'target'
+   * @param {string} config.type - Cell type: 'player' | 'target' | 'ui'
+   * @param {string} [config.cameraType='perspective'] - Camera type: 'perspective' | 'orthographic'
+   * @param {THREE.Scene} [config.scene=null] - Dedicated scene for UI cells
    */
   constructor(config) {
     this.id = config.id;
@@ -25,8 +27,25 @@ export class VoronoiCell {
     // Axis-aligned bounding box for scissor optimization
     this.aabb = { x: 0, y: 0, width: 0, height: 0 };
 
-    // Each cell has its own perspective camera
-    this.camera = new THREE.PerspectiveCamera(60, 1, 1, 20000);
+    // Camera type: 'perspective' for 3D world cells, 'orthographic' for 2D UI cells
+    this.cameraType = config.cameraType || 'perspective';
+
+    // Dedicated scene for UI cells (null for 3D cells that share the world scene)
+    this.scene = config.scene || null;
+
+    // Create camera based on type
+    if (this.cameraType === 'orthographic') {
+      const screenW = window.innerWidth;
+      const screenH = window.innerHeight;
+      this.camera = new THREE.OrthographicCamera(
+        -screenW / 2, screenW / 2,
+        screenH / 2, -screenH / 2,
+        0.1, 100
+      );
+      this.camera.position.z = 10;
+    } else {
+      this.camera = new THREE.PerspectiveCamera(60, 1, 1, 20000);
+    }
 
     // World position this camera looks at
     this.cameraTarget = { x: 0, y: 0 };
@@ -111,6 +130,26 @@ export class VoronoiCell {
     // In transition zone: smoothstep blend
     const t = smoothstep(-blendMargin, visibilityMargin, minDistToEdge);
     return this.terrainZ + t * (playerCameraZ - this.terrainZ);
+  }
+
+  /**
+   * Update the orthographic camera frustum to center on seed position
+   * This is the key technique for 2D UI cells - adjusting the frustum bounds
+   * so that world origin (0,0) maps to the seed position on screen.
+   */
+  updateOrthographicFrustum() {
+    if (this.cameraType !== 'orthographic') return;
+
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    // Adjust frustum so origin maps to seed position
+    // When camera.left = -seed.x, world X=0 maps to screen X=seed.x
+    this.camera.left = -this.seed.x;
+    this.camera.right = screenW - this.seed.x;
+    this.camera.top = this.seed.y;
+    this.camera.bottom = this.seed.y - screenH;
+    this.camera.updateProjectionMatrix();
   }
 
   /**
