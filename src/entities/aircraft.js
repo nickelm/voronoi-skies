@@ -70,26 +70,40 @@ export class Aircraft {
   }
 
   update(deltaTime, inputState) {
-    // Throttle control (W/S)
-    if (inputState.throttleUp) {
-      this.throttle = Math.min(1, this.throttle + deltaTime * 0.5);
-    }
-    if (inputState.throttleDown) {
-      this.throttle = Math.max(0, this.throttle - deltaTime * 0.5);
+    // Throttle control - analog touch or digital keyboard
+    if (inputState.touchActive && Math.abs(inputState.touchThrottle) > 0.1) {
+      // Touch: directly adjust throttle based on analog input
+      // touchThrottle is -1 to 1 (positive = speed up)
+      const throttleChange = inputState.touchThrottle * deltaTime * 1.0;
+      this.throttle = Math.max(0, Math.min(1, this.throttle + throttleChange));
+    } else {
+      // Keyboard: digital throttle control
+      if (inputState.throttleUp) {
+        this.throttle = Math.min(1, this.throttle + deltaTime * 0.5);
+      }
+      if (inputState.throttleDown) {
+        this.throttle = Math.max(0, this.throttle - deltaTime * 0.5);
+      }
     }
 
-    // Turn control (A/D)
-    // Negative heading change = turn left (counterclockwise as viewed from above)
-    if (inputState.turnLeft) {
-      this.heading -= this.turnRate * deltaTime;
-    }
-    if (inputState.turnRight) {
-      this.heading += this.turnRate * deltaTime;
+    // Turn control - analog touch or digital keyboard
+    if (inputState.touchActive && Math.abs(inputState.touchTurn) > 0.1) {
+      // Touch: proportional turn rate based on analog input
+      // touchTurn is -1 to 1 (positive = right)
+      this.heading += inputState.touchTurn * this.turnRate * deltaTime;
+    } else {
+      // Keyboard: full turn rate when key pressed
+      if (inputState.turnLeft) {
+        this.heading -= this.turnRate * deltaTime;
+      }
+      if (inputState.turnRight) {
+        this.heading += this.turnRate * deltaTime;
+      }
     }
     // Normalize heading to 0-2PI
     this.heading = ((this.heading % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
 
-    // Altitude control (Q/E)
+    // Altitude control (Q/E) - keyboard only
     if (inputState.climbUp) {
       this.altitude += this.climbRate * deltaTime;
     }
@@ -110,12 +124,19 @@ export class Aircraft {
     this.y += Math.cos(this.heading) * this.speed * deltaTime;
 
     // Determine if turning (takes priority over pitch)
-    const isTurning = inputState.turnLeft || inputState.turnRight;
+    const isTurning = inputState.turnLeft || inputState.turnRight ||
+                      (inputState.touchActive && Math.abs(inputState.touchTurn) > 0.1);
 
     // Update visual bank angle based on turn input
     let targetBank = 0;
-    if (inputState.turnLeft) targetBank = -1;
-    if (inputState.turnRight) targetBank = 1;
+    if (inputState.touchActive && Math.abs(inputState.touchTurn) > 0.1) {
+      // Touch: analog bank angle
+      targetBank = inputState.touchTurn;
+    } else {
+      // Keyboard: full bank
+      if (inputState.turnLeft) targetBank = -1;
+      if (inputState.turnRight) targetBank = 1;
+    }
     this.bankAngle += (targetBank - this.bankAngle) * Math.min(1, deltaTime * 8);
 
     // Update visual pitch angle based on climb/dive input (only when not turning)
