@@ -54,6 +54,12 @@ function init() {
   // Initialize input handling
   input.init();
 
+  // Initialize touch controls with tap callbacks
+  input.initTouch({
+    onSingleTap: () => dropTarget(),
+    onDoubleTap: () => clearAllTargets(),
+  });
+
   console.log('Voronoi Skies Initialized');
 
   // Get loading UI elements
@@ -779,6 +785,12 @@ function updateDebug(deltaTime) {
       return `  ${t.name}: ${distNm}nm ${t.onScreen ? '✓' : '○'}`;
     });
 
+    // Get touch state for debug display
+    const inputState = input.getInputState();
+    const touchInfo = inputState.touchActive
+      ? `Turn: ${inputState.touchTurn.toFixed(2)} Thr: ${inputState.touchThrottle.toFixed(2)}`
+      : 'Inactive';
+
     debugElement.innerHTML = [
       `FPS: ${fps}`,
       `X: ${Math.round(player.x)}`,
@@ -791,6 +803,9 @@ function updateDebug(deltaTime) {
       `CHUNK: ${chunkX},${chunkY}`,
       `ACTIVE: ${chunkManager.getActiveChunkCount()}`,
       `QUEUE: ${chunkManager.getQueuedChunkCount()}`,
+      `--- TOUCH CONTROLS ---`,
+      `TOUCH: ${touchInfo}`,
+      `TAP: drop view | 2x TAP: clear`,
       `--- VORONOI CELLS ---`,
       `CELLS: ${voronoiCellManager ? voronoiCellManager.cells.length : 0}`,
       `--- TARGETS (9/Shift+9) ---`,
