@@ -194,11 +194,28 @@ export class ChunkManager {
   }
 
   /**
-   * Check if a chunk is still needed based on current player position tracking
+   * Check if a chunk is still needed based on all viewport regions
+   * Returns true if the chunk is required by ANY viewport.
+   * @param {number} chunkX
+   * @param {number} chunkY
+   * @returns {boolean}
    */
   isChunkStillNeeded(chunkX, chunkY) {
-    // If we have a cached player position, check against it
-    // Otherwise assume chunk is still needed
+    // Check against all cached viewport regions
+    if (this.lastViewportRegions && this.lastViewportRegions.length > 0) {
+      const key = `${chunkX},${chunkY}`;
+
+      for (const region of this.lastViewportRegions) {
+        const radius = region.radius ?? this.loadRadius;
+        const required = this.getRequiredChunkCoordsForRegion(region.x, region.y, radius);
+        if (required.some(c => `${c.chunkX},${c.chunkY}` === key)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // Fallback: check against legacy player position
     if (this.lastPlayerX === undefined) return true;
 
     const required = this.getRequiredChunkCoords(this.lastPlayerX, this.lastPlayerY);
@@ -235,12 +252,24 @@ export class ChunkManager {
    * @returns {Array<{chunkX: number, chunkY: number}>}
    */
   getRequiredChunkCoords(playerX, playerY) {
-    const { chunkX: pcx, chunkY: pcy } = this.getPlayerChunk(playerX, playerY);
+    return this.getRequiredChunkCoordsForRegion(playerX, playerY, this.loadRadius);
+  }
+
+  /**
+   * Get chunk coordinates within a radius of a world position
+   * Generalized version that accepts custom radius for multi-viewport support
+   * @param {number} worldX - World X coordinate
+   * @param {number} worldY - World Y coordinate
+   * @param {number} [radius=this.loadRadius] - Chunk radius to load
+   * @returns {Array<{chunkX: number, chunkY: number}>}
+   */
+  getRequiredChunkCoordsForRegion(worldX, worldY, radius = this.loadRadius) {
+    const { chunkX: cx, chunkY: cy } = this.getPlayerChunk(worldX, worldY);
     const required = [];
 
-    for (let dx = -this.loadRadius; dx <= this.loadRadius; dx++) {
-      for (let dy = -this.loadRadius; dy <= this.loadRadius; dy++) {
-        required.push({ chunkX: pcx + dx, chunkY: pcy + dy });
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        required.push({ chunkX: cx + dx, chunkY: cy + dy });
       }
     }
 
@@ -258,22 +287,39 @@ export class ChunkManager {
    * @returns {number}
    */
   calculatePriority(chunkX, chunkY, playerChunkX, playerChunkY, playerHeading) {
-    // Vector from player chunk to target chunk
-    const dx = chunkX - playerChunkX;
-    const dy = chunkY - playerChunkY;
+    return this.calculatePriorityForRegion(chunkX, chunkY, playerChunkX, playerChunkY, 1, playerHeading);
+  }
+
+  /**
+   * Calculate priority for chunk relative to a viewport region
+   * Lower priority = load first. Player viewport (priority=1) gets directional bias.
+   * @param {number} chunkX - Chunk X coordinate
+   * @param {number} chunkY - Chunk Y coordinate
+   * @param {number} regionChunkX - Viewport center chunk X
+   * @param {number} regionChunkY - Viewport center chunk Y
+   * @param {number} regionPriority - Viewport priority (1=highest, higher=lower priority)
+   * @param {number} [playerHeading] - Player heading for directional bias (only used for priority=1)
+   * @returns {number} Priority score (lower = load first)
+   */
+  calculatePriorityForRegion(chunkX, chunkY, regionChunkX, regionChunkY, regionPriority, playerHeading) {
+    // Vector from region center to chunk
+    const dx = chunkX - regionChunkX;
+    const dy = chunkY - regionChunkY;
     const distance = Math.sqrt(dx * dx + dy * dy);
 
-    // Direction vector from player heading (0 = north/+Y)
-    const headingX = Math.sin(playerHeading);
-    const headingY = Math.cos(playerHeading);
+    // Directional bias only for player viewport (priority=1)
+    let directionalBonus = 0;
+    if (regionPriority === 1 && playerHeading !== undefined) {
+      const headingX = Math.sin(playerHeading);
+      const headingY = Math.cos(playerHeading);
+      const length = distance || 1;
+      const dot = (dx * headingX + dy * headingY) / length;
+      directionalBonus = -dot * 1.5; // Negative = higher priority for chunks ahead
+    }
 
-    // Dot product: how much chunk is in front of player
-    const length = distance || 1;
-    const dot = (dx * headingX + dy * headingY) / length;
-
-    // Priority: lower = generate first
-    // Chunks in front (positive dot) get lower priority numbers
-    return distance - dot * 1.5;
+    // Combine: distance + directional bonus + viewport priority weight
+    // regionPriority=1 adds 0, regionPriority=2 adds 5, etc.
+    return distance + directionalBonus + (regionPriority - 1) * 5;
   }
 
   /**
@@ -461,22 +507,56 @@ export class ChunkManager {
   }
 
   /**
-   * Update chunk system: load/unload chunks based on player position
-   * @param {number} playerX
-   * @param {number} playerY
-   * @param {number} playerHeading - Heading in radians
+   * Update chunk system: load/unload chunks based on viewport regions
+   * Supports multiple viewports - chunks visible in any viewport stay loaded.
+   *
+   * @param {Array<{x: number, y: number, radius?: number, priority?: number, id?: string}>} viewportRegions
+   *   Array of viewport regions, each with:
+   *   - x, y: World coordinates (center of viewport)
+   *   - radius: Chunk radius to load (default: this.loadRadius)
+   *   - priority: Load priority, 1=highest (default: 1)
+   *   - id: Optional identifier for debugging
+   * @param {number} playerHeading - Heading in radians (for directional priority)
    * @param {number} deltaTime - Time since last frame (unused but available)
    */
-  update(playerX, playerY, playerHeading, deltaTime) {
-    // Cache player position for stale chunk detection
-    this.lastPlayerX = playerX;
-    this.lastPlayerY = playerY;
+  update(viewportRegions, playerHeading, deltaTime) {
+    // Validate input - require at least one viewport region
+    if (!Array.isArray(viewportRegions) || viewportRegions.length === 0) {
+      return;
+    }
 
-    const required = this.getRequiredChunkCoords(playerX, playerY);
-    const requiredKeys = new Set(required.map(c => `${c.chunkX},${c.chunkY}`));
+    // Cache all viewport regions for isChunkStillNeeded()
+    this.lastViewportRegions = viewportRegions;
 
-    // Unload chunks no longer needed
-    for (const [key, chunk] of this.chunks) {
+    // Legacy compatibility: cache first region as "player" position
+    this.lastPlayerX = viewportRegions[0].x;
+    this.lastPlayerY = viewportRegions[0].y;
+
+    // Collect all required chunks from all viewports
+    const requiredKeys = new Set();
+    const chunkPriorities = new Map(); // key -> best (lowest) priority
+
+    for (const region of viewportRegions) {
+      const radius = region.radius ?? this.loadRadius;
+      const regionPriority = region.priority ?? 1;
+      const chunks = this.getRequiredChunkCoordsForRegion(region.x, region.y, radius);
+      const { chunkX: rcx, chunkY: rcy } = this.getPlayerChunk(region.x, region.y);
+
+      for (const { chunkX, chunkY } of chunks) {
+        const key = `${chunkX},${chunkY}`;
+        requiredKeys.add(key);
+
+        // Track best (lowest) priority for this chunk
+        const chunkPriority = this.calculatePriorityForRegion(
+          chunkX, chunkY, rcx, rcy, regionPriority, playerHeading
+        );
+        const existing = chunkPriorities.get(key) ?? Infinity;
+        chunkPriorities.set(key, Math.min(existing, chunkPriority));
+      }
+    }
+
+    // Unload chunks no longer needed by ANY viewport
+    for (const [key] of this.chunks) {
       if (!requiredKeys.has(key)) {
         this.unloadChunk(key);
       }
@@ -490,20 +570,17 @@ export class ChunkManager {
       }
     }
 
-    // Queue chunks that need loading
-    const { chunkX: pcx, chunkY: pcy } = this.getPlayerChunk(playerX, playerY);
-
-    for (const { chunkX, chunkY } of required) {
-      const key = `${chunkX},${chunkY}`;
+    // Queue chunks that need loading (with merged priorities)
+    for (const key of requiredKeys) {
       if (!this.chunks.has(key) && !this.isQueued(key) && !this.inFlightChunks.has(key)) {
-        const priority = this.calculatePriority(chunkX, chunkY, pcx, pcy, playerHeading);
-        this.enqueue(chunkX, chunkY, priority);
+        const [cx, cy] = key.split(',').map(Number);
+        this.enqueue(cx, cy, chunkPriorities.get(key));
       }
     }
 
     // Sort queue by priority and process
     this.generationQueue.sort((a, b) => a.priority - b.priority);
-    this.processGenerationQueue(4); // Increased since worker is async
+    this.processGenerationQueue(4);
   }
 
   /**
