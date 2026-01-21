@@ -4,6 +4,12 @@
  * UI cells are Voronoi cells that render 2D content (instruments, gauges)
  * at fixed screen positions. Each UI cell has its own isolated scene and
  * orthographic camera.
+ *
+ * This class acts as a facade over VoronoiCellManager for UI-specific concerns:
+ * - Creates cells with orthographic cameras
+ * - Manages dedicated scenes per cell
+ * - Handles position updates (pixel or ratio-based)
+ * - Provides enable/disable functionality
  */
 
 import { VoronoiCell } from '../voronoi/VoronoiCell.js';
@@ -14,16 +20,17 @@ export class UiCellManager {
    * @param {import('../voronoi/VoronoiCellManager.js').VoronoiCellManager} voronoiCellManager
    */
   constructor(voronoiCellManager) {
-    this.cellManager = voronoiCellManager;
+    this._cellManager = voronoiCellManager;
 
-    // Map of id -> { cell, scene, enabled, sceneData }
-    this.uiCells = new Map();
+    // Map of id -> UiCellData
+    this._uiCells = new Map();
 
     // Scene factory for creating UI content
-    this.sceneFactory = new UiSceneFactory();
+    this._sceneFactory = new UiSceneFactory();
 
     // Listen for resize events to update positions
-    window.addEventListener('resize', () => this._onResize());
+    this._resizeHandler = () => this._onResize();
+    window.addEventListener('resize', this._resizeHandler);
   }
 
   /**
@@ -36,12 +43,11 @@ export class UiCellManager {
    * @param {Object} [options] - Additional options
    * @param {number} [options.color] - Color for test scenes
    * @param {number} [options.deconflictRadius=0.05] - Deconfliction radius as screen ratio (0-1)
-   *        Targets within this radius will be pushed away to ensure UI visibility
    * @returns {VoronoiCell} The created UI cell
    */
   registerUiCell(id, x, y, instrumentType, options = {}) {
     // Remove existing cell with same id if present
-    if (this.uiCells.has(id)) {
+    if (this._uiCells.has(id)) {
       this.removeUiCell(id);
     }
 
@@ -49,19 +55,22 @@ export class UiCellManager {
     let sceneData;
     switch (instrumentType) {
       case 'test':
-        sceneData = this.sceneFactory.createTestScene(options.color);
+        sceneData = this._sceneFactory.createTestScene(options.color);
         break;
-      // Future instrument types can be added here
       default:
-        sceneData = this.sceneFactory.createTestScene(options.color);
+        sceneData = this._sceneFactory.createTestScene(options.color);
     }
 
-    // Create VoronoiCell with orthographic camera
-    const cell = new VoronoiCell({
-      id: this.cellManager.cells.length,
-      type: 'ui',
+    // Calculate deconfliction radius in pixels
+    const screenDiag = Math.hypot(window.innerWidth, window.innerHeight);
+    const deconflictRatio = options.deconflictRadius !== undefined ? options.deconflictRadius : 0.05;
+    const deconflictRadius = deconflictRatio * screenDiag;
+
+    // Create cell via VoronoiCellManager
+    const cell = this._cellManager.createCell('ui', {
       cameraType: 'orthographic',
-      scene: sceneData.scene
+      scene: sceneData.scene,
+      deconflictRadius
     });
 
     // Calculate actual screen position
@@ -75,10 +84,10 @@ export class UiCellManager {
     // UI cells are always exclusive (never merge with player)
     cell.onScreen = false;
 
-    // Store original position ratios for resize handling
-    // Default deconfliction radius is 5% of screen diagonal
-    const deconflictRadius = options.deconflictRadius !== undefined ? options.deconflictRadius : 0.05;
+    // Recompute Voronoi now that seed position is set
+    this._cellManager.computeVoronoi();
 
+    // Store UI-specific data
     const uiCellData = {
       cell,
       scene: sceneData.scene,
@@ -87,14 +96,10 @@ export class UiCellManager {
       posX: x,
       posY: y,
       instrumentType,
-      deconflictRadius
+      deconflictRatio
     };
 
-    this.uiCells.set(id, uiCellData);
-
-    // Add to VoronoiCellManager
-    this.cellManager.cells.push(cell);
-    this.cellManager.computeVoronoi();
+    this._uiCells.set(id, uiCellData);
 
     return cell;
   }
@@ -104,16 +109,16 @@ export class UiCellManager {
    * @param {string} id - UI cell identifier
    */
   removeUiCell(id) {
-    const uiCellData = this.uiCells.get(id);
+    const uiCellData = this._uiCells.get(id);
     if (!uiCellData) return;
 
-    // Remove from VoronoiCellManager
-    this.cellManager.removeCell(uiCellData.cell);
+    // Unregister from VoronoiCellManager
+    this._cellManager.unregisterCell(uiCellData.cell);
 
     // Dispose scene resources
     this._disposeScene(uiCellData.scene);
 
-    this.uiCells.delete(id);
+    this._uiCells.delete(id);
   }
 
   /**
@@ -122,7 +127,7 @@ export class UiCellManager {
    * @param {boolean} enabled - Whether the cell should be visible
    */
   setEnabled(id, enabled) {
-    const uiCellData = this.uiCells.get(id);
+    const uiCellData = this._uiCells.get(id);
     if (!uiCellData) return;
 
     if (enabled === uiCellData.enabled) return;
@@ -130,17 +135,12 @@ export class UiCellManager {
     uiCellData.enabled = enabled;
 
     if (enabled) {
-      // Re-add to VoronoiCellManager
-      this.cellManager.cells.push(uiCellData.cell);
+      // Re-register with VoronoiCellManager
+      this._cellManager.registerCell(uiCellData.cell);
     } else {
-      // Remove from VoronoiCellManager (but keep in our map)
-      const index = this.cellManager.cells.indexOf(uiCellData.cell);
-      if (index !== -1) {
-        this.cellManager.cells.splice(index, 1);
-      }
+      // Unregister from VoronoiCellManager (but keep in our map)
+      this._cellManager.unregisterCell(uiCellData.cell);
     }
-
-    this.cellManager.computeVoronoi();
   }
 
   /**
@@ -150,7 +150,7 @@ export class UiCellManager {
    * @param {number} y - New Y position (pixels if >= 1, ratio if < 1)
    */
   setPosition(id, x, y) {
-    const uiCellData = this.uiCells.get(id);
+    const uiCellData = this._uiCells.get(id);
     if (!uiCellData) return;
 
     const screenW = window.innerWidth;
@@ -163,34 +163,27 @@ export class UiCellManager {
     uiCellData.cell.seed = { x: actualX, y: actualY };
 
     if (uiCellData.enabled) {
-      this.cellManager.computeVoronoi();
+      this._cellManager.computeVoronoi();
     }
   }
 
   /**
-   * Get all active UI cell seeds for deconfliction
-   * @returns {Array<{id: string, x: number, y: number, radius: number}>}
-   *          radius is in pixels, computed from the relative deconflictRadius
+   * Get UI cell data by id
+   * @param {string} id - UI cell identifier
+   * @returns {Object|undefined} UI cell data or undefined
    */
-  getActiveUiSeeds() {
-    const seeds = [];
-    const screenW = window.innerWidth;
-    const screenH = window.innerHeight;
-    // Use screen diagonal for radius calculation
-    const screenDiag = Math.hypot(screenW, screenH);
+  getUiCell(id) {
+    return this._uiCells.get(id);
+  }
 
-    for (const [id, data] of this.uiCells) {
-      if (data.enabled) {
-        seeds.push({
-          id,
-          x: data.cell.seed.x,
-          y: data.cell.seed.y,
-          // Convert relative radius to pixels based on screen diagonal
-          radius: data.deconflictRadius * screenDiag
-        });
-      }
-    }
-    return seeds;
+  /**
+   * Check if a UI cell exists and is enabled
+   * @param {string} id - UI cell identifier
+   * @returns {boolean}
+   */
+  isEnabled(id) {
+    const data = this._uiCells.get(id);
+    return data ? data.enabled : false;
   }
 
   /**
@@ -201,7 +194,19 @@ export class UiCellManager {
    */
   updateInstruments(playerState) {
     // Future: animate instrument needles, update readouts, etc.
-    // For now, test scenes don't need updates
+  }
+
+  /**
+   * Clean up all resources
+   */
+  dispose() {
+    window.removeEventListener('resize', this._resizeHandler);
+
+    for (const [id, data] of this._uiCells) {
+      this._cellManager.unregisterCell(data.cell);
+      this._disposeScene(data.scene);
+    }
+    this._uiCells.clear();
   }
 
   /**
@@ -211,13 +216,17 @@ export class UiCellManager {
   _onResize() {
     const screenW = window.innerWidth;
     const screenH = window.innerHeight;
+    const screenDiag = Math.hypot(screenW, screenH);
 
-    for (const [id, data] of this.uiCells) {
+    for (const [id, data] of this._uiCells) {
       // Recalculate position from stored ratio/pixel values
       const actualX = data.posX < 1 ? data.posX * screenW : data.posX;
       const actualY = data.posY < 1 ? data.posY * screenH : data.posY;
 
       data.cell.seed = { x: actualX, y: actualY };
+
+      // Update deconfliction radius based on new screen size
+      data.cell.deconflictRadius = data.deconflictRatio * screenDiag;
     }
 
     // VoronoiCellManager will recompute Voronoi on its own resize handler
@@ -241,15 +250,5 @@ export class UiCellManager {
         }
       }
     });
-  }
-
-  /**
-   * Clean up all resources
-   */
-  dispose() {
-    for (const [id, data] of this.uiCells) {
-      this._disposeScene(data.scene);
-    }
-    this.uiCells.clear();
   }
 }

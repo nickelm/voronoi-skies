@@ -1,9 +1,16 @@
 /**
  * VoronoiCellManager - Orchestrates Voronoi cell rendering
  *
- * Uses ViewportManager for all rendering operations.
- * Currently simplified: single cell = simple fullscreen render.
- * Multi-cell stencil rendering will be added via ViewportManager.
+ * Responsibilities:
+ * - Manages the lifecycle of all Voronoi cells (player, target, UI)
+ * - Computes Voronoi tessellation from cell seeds
+ * - Handles seed deconfliction to prevent overlapping cells
+ * - Renders cells with appropriate stencil masking
+ *
+ * Cell types:
+ * - 'player': Always at screen center, perspective camera, shared scene
+ * - 'target': World-space entities, perspective camera, shared scene
+ * - 'ui': Screen-space UI elements, orthographic camera, dedicated scene
  */
 
 import * as THREE from 'three';
@@ -11,6 +18,9 @@ import { Delaunay } from 'd3-delaunay';
 import { VoronoiCell } from './VoronoiCell.js';
 import { ViewportManager } from '../viewport/ViewportManager.js';
 import { CellBorderRenderer } from './CellBorderRenderer.js';
+
+// Minimum distance between seeds before deconfliction kicks in
+const DEFAULT_MIN_SEED_DISTANCE = 40;
 
 export class VoronoiCellManager {
   /**
@@ -29,18 +39,26 @@ export class VoronoiCellManager {
     // Border renderer for cell boundaries
     this.borderRenderer = new CellBorderRenderer();
 
-    // Active cells
-    this.cells = [];
+    // Active cells (private - use methods to access)
+    this._cells = [];
 
     // Voronoi tessellation
-    this.voronoi = null;
+    this._voronoi = null;
 
     // Screen bounds for Voronoi computation
-    this.bounds = [0, 0, window.innerWidth, window.innerHeight];
+    this._bounds = [0, 0, window.innerWidth, window.innerHeight];
+
+    // Deconfliction settings
+    this._minSeedDistance = DEFAULT_MIN_SEED_DISTANCE;
 
     // Listen for resize events
-    window.addEventListener('resize', () => this.onResize());
+    this._resizeHandler = () => this._onResize();
+    window.addEventListener('resize', this._resizeHandler);
   }
+
+  // ============================================
+  // Public API - Cell Management
+  // ============================================
 
   /**
    * Initialize with player cell only
@@ -50,58 +68,117 @@ export class VoronoiCellManager {
       id: 0,
       type: 'player'
     });
-    // Player seed at screen center
     playerCell.seed = {
       x: window.innerWidth / 2,
       y: window.innerHeight / 2
     };
 
-    this.cells = [playerCell];
-    this.computeVoronoi();
+    this._cells = [playerCell];
+    this._computeVoronoi();
   }
 
   /**
-   * Add a new cell dynamically
-   * @param {string} type - Cell type identifier ('target', 'ui', etc.)
+   * Create and register a new cell
+   * @param {string} type - Cell type: 'target' | 'ui'
+   * @param {Object} [config] - Additional configuration
+   * @param {string} [config.cameraType] - 'perspective' | 'orthographic'
+   * @param {THREE.Scene} [config.scene] - Dedicated scene for UI cells
+   * @param {number} [config.deconflictRadius] - Custom deconfliction radius in pixels
    * @returns {VoronoiCell} The created cell
    */
-  addCell(type) {
-    const id = this.cells.length;
-    const cell = new VoronoiCell({ id, type });
-    this.cells.push(cell);
-    this.computeVoronoi();
+  createCell(type, config = {}) {
+    const id = this._cells.length;
+    const cell = new VoronoiCell({
+      id,
+      type,
+      cameraType: config.cameraType,
+      scene: config.scene
+    });
+
+    // Store deconfliction radius on the cell if provided
+    if (config.deconflictRadius !== undefined) {
+      cell.deconflictRadius = config.deconflictRadius;
+    }
+
+    this._cells.push(cell);
+    this._computeVoronoi();
     return cell;
   }
 
   /**
-   * Remove a cell by reference
-   * @param {VoronoiCell} cell - Cell to remove
+   * Register an externally-created cell
+   * Use this when you need full control over cell creation
+   * @param {VoronoiCell} cell - The cell to register
    */
-  removeCell(cell) {
-    const index = this.cells.indexOf(cell);
+  registerCell(cell) {
+    cell.id = this._cells.length;
+    this._cells.push(cell);
+    this._computeVoronoi();
+  }
+
+  /**
+   * Unregister a cell (remove from manager but don't dispose)
+   * @param {VoronoiCell} cell - Cell to unregister
+   */
+  unregisterCell(cell) {
+    const index = this._cells.indexOf(cell);
     if (index !== -1) {
-      this.cells.splice(index, 1);
-      this.cells.forEach((c, i) => c.id = i);
-      this.computeVoronoi();
+      this._cells.splice(index, 1);
+      this._reassignIds();
+      this._computeVoronoi();
     }
   }
 
   /**
-   * Get player cell
+   * Remove and dispose a cell
+   * @param {VoronoiCell} cell - Cell to remove
+   */
+  removeCell(cell) {
+    this.unregisterCell(cell);
+    // Note: Scene disposal is the responsibility of whoever created the scene
+  }
+
+  /**
+   * Get the player cell
    * @returns {VoronoiCell|null}
    */
   getPlayerCell() {
-    return this.cells.find(c => c.type === 'player') || null;
+    return this._cells.find(c => c.type === 'player') || null;
+  }
+
+  /**
+   * Get all cells of a specific type
+   * @param {string} type - Cell type to filter by
+   * @returns {VoronoiCell[]}
+   */
+  getCellsByType(type) {
+    return this._cells.filter(c => c.type === type);
+  }
+
+  /**
+   * Get all registered cells (read-only copy)
+   * @returns {VoronoiCell[]}
+   */
+  getCells() {
+    return [...this._cells];
+  }
+
+  /**
+   * Get cell count
+   * @returns {number}
+   */
+  getCellCount() {
+    return this._cells.length;
   }
 
   /**
    * Find which cell contains the given screen coordinates
    * @param {number} x - Screen X coordinate
    * @param {number} y - Screen Y coordinate
-   * @returns {VoronoiCell|null} The cell containing the point, or null
+   * @returns {VoronoiCell|null}
    */
   getCellAtPoint(x, y) {
-    for (const cell of this.cells) {
+    for (const cell of this._cells) {
       if (cell.containsPoint(x, y)) {
         return cell;
       }
@@ -109,23 +186,126 @@ export class VoronoiCellManager {
     return null;
   }
 
+  // ============================================
+  // Public API - Deconfliction
+  // ============================================
+
   /**
-   * Compute Voronoi tessellation from cell seeds
+   * Set the minimum seed distance for deconfliction
+   * @param {number} distance - Minimum distance in pixels
+   */
+  setMinSeedDistance(distance) {
+    this._minSeedDistance = distance;
+  }
+
+  /**
+   * Deconflict seeds that are too close together
+   *
+   * Rules:
+   * - Player seed is immovable (always at center)
+   * - UI seeds are immovable (fixed positions)
+   * - Target seeds are pushed away from immovable seeds
+   * - Target seeds are pushed apart from each other
+   *
+   * @param {Array<{seedX: number, seedY: number, id: any}>} mobileSeeds - Seeds that can be moved (targets)
+   * @param {Array<{x: number, y: number, radius?: number}>} [fixedSeeds] - Additional immovable seeds with optional custom radius
+   */
+  deconflictSeeds(mobileSeeds, fixedSeeds = []) {
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+    const cx = screenW / 2;
+    const cy = screenH / 2;
+
+    // Collect all immovable seeds: player + UI cells + any provided fixed seeds
+    const immovableSeeds = [];
+
+    // Add player seed
+    const playerCell = this.getPlayerCell();
+    if (playerCell) {
+      immovableSeeds.push({
+        x: playerCell.seed.x,
+        y: playerCell.seed.y,
+        radius: this._minSeedDistance
+      });
+    }
+
+    // Add UI cell seeds
+    for (const cell of this._cells) {
+      if (cell.type === 'ui') {
+        immovableSeeds.push({
+          x: cell.seed.x,
+          y: cell.seed.y,
+          radius: cell.deconflictRadius || this._minSeedDistance
+        });
+      }
+    }
+
+    // Add any externally-provided fixed seeds
+    for (const seed of fixedSeeds) {
+      immovableSeeds.push({
+        x: seed.x,
+        y: seed.y,
+        radius: seed.radius || this._minSeedDistance
+      });
+    }
+
+    // Phase 1: Push mobile seeds away from immovable seeds
+    for (const mobile of mobileSeeds) {
+      for (const fixed of immovableSeeds) {
+        const dist = Math.hypot(mobile.seedX - fixed.x, mobile.seedY - fixed.y);
+        const minDist = fixed.radius;
+        if (dist < minDist) {
+          const dx = mobile.seedX - fixed.x;
+          const dy = mobile.seedY - fixed.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const pushDist = minDist - dist + 5;
+          mobile.seedX += (dx / len) * pushDist;
+          mobile.seedY += (dy / len) * pushDist;
+        }
+      }
+    }
+
+    // Phase 2: Push mobile seeds apart from each other
+    for (const mobile of mobileSeeds) {
+      for (const other of mobileSeeds) {
+        if (mobile === other) continue;
+
+        const dist = Math.hypot(mobile.seedX - other.seedX, mobile.seedY - other.seedY);
+        if (dist < this._minSeedDistance) {
+          // Push apart along tangent to screen edge
+          const edgeDx = mobile.seedX - cx;
+          const edgeDy = mobile.seedY - cy;
+          const edgeLen = Math.hypot(edgeDx, edgeDy);
+
+          if (edgeLen > 0) {
+            const tangentX = -edgeDy / edgeLen;
+            const tangentY = edgeDx / edgeLen;
+            const offset = (this._minSeedDistance - dist) / 2 + 5;
+            // Deterministic ordering by id
+            const sign = mobile.id < other.id ? 1 : -1;
+            mobile.seedX += tangentX * offset * sign;
+            mobile.seedY += tangentY * offset * sign;
+          }
+        }
+      }
+
+      // Clamp to screen bounds
+      const margin = 5;
+      mobile.seedX = Math.max(margin, Math.min(screenW - margin, mobile.seedX));
+      mobile.seedY = Math.max(margin, Math.min(screenH - margin, mobile.seedY));
+    }
+  }
+
+  // ============================================
+  // Public API - Rendering
+  // ============================================
+
+  /**
+   * Recompute Voronoi tessellation
+   * Call this after updating seed positions
    */
   computeVoronoi() {
-    if (this.cells.length === 0) return;
-
-    const points = this.cells.map(cell => [cell.seed.x, cell.seed.y]);
-    const delaunay = Delaunay.from(points);
-    this.voronoi = delaunay.voronoi(this.bounds);
-
-    this.cells.forEach((cell, index) => {
-      const polygon = this.voronoi.cellPolygon(index);
-      cell.updatePolygon(polygon);
-    });
-
-    // Update border geometry
-    this.borderRenderer.updateFromCells(this.cells);
+    this._computeVoronoi();
   }
 
   /**
@@ -134,7 +314,7 @@ export class VoronoiCellManager {
   updateCameras() {
     if (!this.mainCamera) return;
 
-    for (const cell of this.cells) {
+    for (const cell of this._cells) {
       if (cell.type === 'player') {
         cell.updateCameraFromMain(this.mainCamera);
       }
@@ -143,57 +323,81 @@ export class VoronoiCellManager {
 
   /**
    * Render all cells
-   *
-   * Single cell: simple fullscreen render (no stencil needed)
-   * Multiple cells: use ViewportManager for stencil-masked rendering
    */
   render() {
-    // Clear all buffers
     this.viewportManager.clearBuffers();
 
     const playerCell = this.getPlayerCell();
     if (!playerCell) return;
 
-    if (this.cells.length === 1) {
+    if (this._cells.length === 1) {
       // Fast path: single cell, no stencil masking needed
       this.renderer.render(this.scene, playerCell.camera);
     } else {
-      // Multi-cell path: use stencil masking via ViewportManager
+      // Multi-cell path: use stencil masking
       this._renderMultiCell();
-
-      // Render borders on top of all cells
       this.borderRenderer.render(this.renderer);
     }
   }
 
   /**
+   * Clean up resources
+   */
+  dispose() {
+    window.removeEventListener('resize', this._resizeHandler);
+    this.viewportManager.dispose();
+    this.borderRenderer.dispose();
+  }
+
+  // ============================================
+  // Private Methods
+  // ============================================
+
+  /**
+   * Reassign sequential IDs after cell removal
+   * @private
+   */
+  _reassignIds() {
+    this._cells.forEach((c, i) => c.id = i);
+  }
+
+  /**
+   * Compute Voronoi tessellation from cell seeds
+   * @private
+   */
+  _computeVoronoi() {
+    if (this._cells.length === 0) return;
+
+    const points = this._cells.map(cell => [cell.seed.x, cell.seed.y]);
+    const delaunay = Delaunay.from(points);
+    this._voronoi = delaunay.voronoi(this._bounds);
+
+    this._cells.forEach((cell, index) => {
+      const polygon = this._voronoi.cellPolygon(index);
+      cell.updatePolygon(polygon);
+    });
+
+    this.borderRenderer.updateFromCells(this._cells);
+  }
+
+  /**
    * Render multiple cells with stencil masking
-   * Uses two-phase rendering: write all masks first, then render all scenes
-   *
-   * Cell classification:
-   * - On-screen cells (player + on-screen targets): share stencil ref=1, render with player camera
-   * - Off-screen cells (off-screen targets): get unique refs (2, 3, 4...), render with own cameras
-   *
    * @private
    */
   _renderMultiCell() {
     const gl = this.renderer.getContext();
 
-    // Separate cells into on-screen (merged) and off-screen (exclusive)
     const playerCell = this.getPlayerCell();
-    const onScreenCells = this.cells.filter(c => c.type === 'player' || c.onScreen === true);
-    const exclusiveCells = this.cells.filter(c => c.type !== 'player' && c.onScreen === false);
+    const onScreenCells = this._cells.filter(c => c.type === 'player' || c.onScreen === true);
+    const exclusiveCells = this._cells.filter(c => c.type !== 'player' && c.onScreen === false);
 
-    // Phase 1: Write ALL stencil masks first
-
-    // On-screen cells (player + visible targets) all get ref=1 - they merge
+    // Phase 1: Write all stencil masks
     for (const cell of onScreenCells) {
       if (cell.polygon) {
         this.viewportManager.writeMask(cell.polygon, 1);
       }
     }
 
-    // Off-screen/exclusive cells get ref=2, 3, 4...
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
       if (cell.polygon) {
@@ -202,22 +406,17 @@ export class VoronoiCellManager {
     }
 
     // Phase 2: Render all scenes with stencil test
-
-    // 2a. Render merged on-screen area (ref=1) with player camera - NO frustum shift
     if (playerCell) {
       this._renderCellWithStencil(playerCell, 1, false);
     }
 
-    // 2b. Render exclusive cells with type-specific rendering
     for (let i = 0; i < exclusiveCells.length; i++) {
       const cell = exclusiveCells[i];
       const refValue = i + 2;
 
       if (cell.type === 'ui') {
-        // 2D UI cells use orthographic rendering with frustum adjustment
         this._renderUiCell(cell, refValue);
       } else {
-        // 3D target cells use perspective rendering with frustum shift
         this._renderCellWithStencil(cell, refValue, true);
       }
     }
@@ -225,57 +424,38 @@ export class VoronoiCellManager {
 
   /**
    * Render a single cell where stencil matches refValue
-   *
-   * For non-player cells, we use frustum shifting to achieve the seed alignment effect.
-   * This is more reliable than viewport offset because it doesn't clip at screen edges.
-   *
    * @private
-   * @param {VoronoiCell} cell - Cell to render
-   * @param {number} refValue - Stencil reference value
-   * @param {boolean} useFrustumShift - Whether to shift the frustum (false for player cell at center)
    */
   _renderCellWithStencil(cell, refValue, useFrustumShift = false) {
     const gl = this.renderer.getContext();
     const screenW = window.innerWidth;
     const screenH = window.innerHeight;
 
-    // IMPORTANT: Disable scissor test and set full-screen viewport
     this.renderer.setScissorTest(false);
     gl.viewport(0, 0, screenW, screenH);
 
-    // Apply frustum shift for non-centered cells
-    // This shifts what the camera sees so the target appears at the seed position
     if (useFrustumShift) {
-      // Calculate the NDC offset: how far the seed is from screen center
-      // Seed at center = (0,0) in NDC, seed at left edge = (-1, y)
-      const ndcOffsetX = (cell.seed.x / screenW) * 2 - 1;  // -1 to 1
-      const ndcOffsetY = 1 - (cell.seed.y / screenH) * 2;  // -1 to 1 (Y flipped)
+      const ndcOffsetX = (cell.seed.x / screenW) * 2 - 1;
+      const ndcOffsetY = 1 - (cell.seed.y / screenH) * 2;
 
-      // Apply asymmetric frustum by modifying the projection matrix
-      // This shifts the view without changing the viewport
       cell.camera.aspect = screenW / screenH;
       cell.camera.updateProjectionMatrix();
 
-      // Modify projection matrix to shift the frustum
-      // This is equivalent to: projMatrix * translateMatrix(-ndcOffsetX, -ndcOffsetY, 0)
       const projMatrix = cell.camera.projectionMatrix;
-      projMatrix.elements[8] = -ndcOffsetX;   // Shift X in clip space
-      projMatrix.elements[9] = -ndcOffsetY;   // Shift Y in clip space
+      projMatrix.elements[8] = -ndcOffsetX;
+      projMatrix.elements[9] = -ndcOffsetY;
     } else {
       cell.camera.aspect = screenW / screenH;
       cell.camera.updateProjectionMatrix();
     }
 
-    // Clear depth between cells
     gl.clear(gl.DEPTH_BUFFER_BIT);
 
-    // Configure stencil test
     gl.enable(gl.STENCIL_TEST);
     gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
     gl.stencilMask(0x00);
 
-    // Render with cell's camera
     this.renderer.render(this.scene, cell.camera);
 
     gl.disable(gl.STENCIL_TEST);
@@ -283,39 +463,25 @@ export class VoronoiCellManager {
 
   /**
    * Render a 2D UI cell with orthographic projection
-   *
-   * UI cells use a different rendering technique than 3D cells:
-   * - Orthographic camera (not perspective)
-   * - Frustum adjustment instead of frustum shift (camera.left/right/top/bottom)
-   * - Each UI cell has its own dedicated scene
-   * - Full viewport, stencil alone handles clipping
-   *
    * @private
-   * @param {VoronoiCell} cell - UI cell to render
-   * @param {number} refValue - Stencil reference value
    */
   _renderUiCell(cell, refValue) {
     const gl = this.renderer.getContext();
     const screenW = window.innerWidth;
     const screenH = window.innerHeight;
 
-    // Standard viewport (no offset for orthographic)
     this.renderer.setScissorTest(false);
     gl.viewport(0, 0, screenW, screenH);
 
-    // Adjust orthographic camera frustum to center on seed position
     cell.updateOrthographicFrustum();
 
-    // Clear depth for this cell
     gl.clear(gl.DEPTH_BUFFER_BIT);
 
-    // Configure stencil test
     gl.enable(gl.STENCIL_TEST);
     gl.stencilFunc(gl.EQUAL, refValue, 0xFF);
     gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
     gl.stencilMask(0x00);
 
-    // Render UI scene (NOT the shared world scene)
     if (cell.scene) {
       this.renderer.render(cell.scene, cell.camera);
     }
@@ -325,25 +491,17 @@ export class VoronoiCellManager {
 
   /**
    * Handle window resize
+   * @private
    */
-  onResize() {
-    this.bounds = [0, 0, window.innerWidth, window.innerHeight];
+  _onResize() {
+    this._bounds = [0, 0, window.innerWidth, window.innerHeight];
 
-    // Update player seed to new center
     const playerCell = this.getPlayerCell();
     if (playerCell) {
       playerCell.seed.x = window.innerWidth / 2;
       playerCell.seed.y = window.innerHeight / 2;
     }
 
-    this.computeVoronoi();
-  }
-
-  /**
-   * Clean up resources
-   */
-  dispose() {
-    this.viewportManager.dispose();
-    this.borderRenderer.dispose();
+    this._computeVoronoi();
   }
 }

@@ -38,7 +38,6 @@ let nextTargetId = 0;    // Incrementing ID for deterministic ordering
 
 const SCREEN_INSET = 30;
 const VISIBILITY_MARGIN = 50;  // Margin for on-screen detection (matches reference test)
-const MIN_SEED_DISTANCE = 40;  // Minimum distance between seeds for deconfliction
 
 // Three.js lighting
 let directionalLight = null;
@@ -312,10 +311,8 @@ function initLightingControls() {
       // UI Cell Toggle
       case 'Digit0':
         if (uiCellManager) {
-          const uiCellData = uiCellManager.uiCells.get('test-ui');
-          if (uiCellData) {
-            uiCellManager.setEnabled('test-ui', !uiCellData.enabled);
-          }
+          const isCurrentlyEnabled = uiCellManager.isEnabled('test-ui');
+          uiCellManager.setEnabled('test-ui', !isCurrentlyEnabled);
         }
         break;
     }
@@ -573,76 +570,6 @@ function rayToScreenEdge(targetX, targetY, screenW, screenH) {
 }
 
 /**
- * Deconflict off-screen target seeds that are too close together or to UI cells
- * Uses deterministic ordering by target ID to prevent flicker
- *
- * UI cell seeds are immovable - targets must move away from them
- *
- * @param {Array} offScreenTargets - Array of targets with their computed seed positions
- */
-function deconflictSeeds(offScreenTargets) {
-  const screenW = window.innerWidth;
-  const screenH = window.innerHeight;
-  const cx = screenW / 2;
-  const cy = screenH / 2;
-
-  // Get UI cell seeds (these are immovable)
-  const uiSeeds = uiCellManager ? uiCellManager.getActiveUiSeeds() : [];
-
-  // First: push targets away from UI cell seeds (UI seeds are immovable)
-  // Each UI seed has its own configurable deconfliction radius
-  for (const target of offScreenTargets) {
-    for (const uiSeed of uiSeeds) {
-      const dist = Math.hypot(target.seedX - uiSeed.x, target.seedY - uiSeed.y);
-      // Use the UI cell's configured radius, or fall back to MIN_SEED_DISTANCE
-      const minDist = uiSeed.radius || MIN_SEED_DISTANCE;
-      if (dist < minDist) {
-        // Calculate direction from UI seed to target
-        const dx = target.seedX - uiSeed.x;
-        const dy = target.seedY - uiSeed.y;
-        const len = Math.hypot(dx, dy) || 1;
-
-        // Push target away from UI seed
-        const pushDist = minDist - dist + 5;
-        target.seedX += (dx / len) * pushDist;
-        target.seedY += (dy / len) * pushDist;
-      }
-    }
-  }
-
-  // Then: deconflict targets against each other
-  for (const target of offScreenTargets) {
-    for (const other of offScreenTargets) {
-      if (target === other) continue;
-
-      const dist = Math.hypot(target.seedX - other.seedX, target.seedY - other.seedY);
-      if (dist < MIN_SEED_DISTANCE) {
-        // Push seeds apart along tangent to screen edge
-        const edgeDx = target.seedX - cx;
-        const edgeDy = target.seedY - cy;
-        const edgeLen = Math.hypot(edgeDx, edgeDy);
-
-        if (edgeLen > 0) {
-          const tangentX = -edgeDy / edgeLen;
-          const tangentY = edgeDx / edgeLen;
-
-          const offset = (MIN_SEED_DISTANCE - dist) / 2 + 5;
-          // Deterministic ordering by target ID
-          const sign = target.id < other.id ? 1 : -1;
-          target.seedX += tangentX * offset * sign;
-          target.seedY += tangentY * offset * sign;
-        }
-      }
-    }
-
-    // Clamp to screen bounds
-    const margin = 5;
-    target.seedX = Math.max(margin, Math.min(screenW - margin, target.seedX));
-    target.seedY = Math.max(margin, Math.min(screenH - margin, target.seedY));
-  }
-}
-
-/**
  * Update all test targets each frame
  *
  * Each target is at a FIXED world position (set when dropped with key 9).
@@ -691,16 +618,16 @@ function updateTestTargets() {
     }
   }
 
-  // Apply deconfliction to off-screen targets only
-  if (offScreenTargets.length > 1) {
-    deconflictSeeds(offScreenTargets);
+  // Apply deconfliction to off-screen targets (VoronoiCellManager handles UI seeds)
+  if (offScreenTargets.length > 0) {
+    voronoiCellManager.deconflictSeeds(offScreenTargets);
   }
 
   // Second pass: update cells for ALL targets
   for (const target of testTargets) {
     // Ensure cell exists for this target
-    if (!target.cell || !voronoiCellManager.cells.includes(target.cell)) {
-      target.cell = voronoiCellManager.addCell('target');
+    if (!target.cell || !voronoiCellManager.getCells().includes(target.cell)) {
+      target.cell = voronoiCellManager.createCell('target');
       target.cell.target = target;
       // Set the cell's independent terrain Z from the target's initial value
       target.cell.setTerrainZ(target.initialCameraZ);
@@ -809,7 +736,7 @@ function clearAllTargets() {
     }
 
     // Remove Voronoi cell if it exists
-    if (target.cell && voronoiCellManager.cells.includes(target.cell)) {
+    if (target.cell && voronoiCellManager.getCells().includes(target.cell)) {
       voronoiCellManager.removeCell(target.cell);
     }
   }
@@ -967,7 +894,7 @@ function updateDebug(deltaTime) {
       `TOUCH: ${touchInfo}`,
       `TAP: drop view | 2x TAP: clear`,
       `--- VORONOI CELLS ---`,
-      `CELLS: ${voronoiCellManager ? voronoiCellManager.cells.length : 0}`,
+      `CELLS: ${voronoiCellManager ? voronoiCellManager.getCellCount() : 0}`,
       `--- TARGETS (9/Shift+9) ---`,
       `COUNT: ${targetInfo}`,
       ...targetLines,
