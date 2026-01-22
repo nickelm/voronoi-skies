@@ -12,6 +12,7 @@
       font-family: monospace;
     }
     #game-container {
+      position: relative;
       width: 100vw;
       height: 100vh;
       display: flex;
@@ -95,7 +96,7 @@
     <div id="loading-text">Generating terrain...</div>
   </div>
   <div id="game-container"></div>
-  <div id="info">WASD: fly | Q/E: altitude | 1: dawn | 2: noon | 3: night</div>
+  <div id="info">A/D: turn | W/S: throttle | Q/E: altitude | X: center | 1/2/3: time</div>
   <div id="debug"></div>
   <script type="module" src="./src/main.js"></script>
 </body>

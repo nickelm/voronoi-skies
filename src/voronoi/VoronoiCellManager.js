@@ -18,6 +18,7 @@ import { Delaunay } from 'd3-delaunay';
 import { VoronoiCell } from './VoronoiCell.js';
 import { ViewportManager } from '../viewport/ViewportManager.js';
 import { CellBorderRenderer } from './CellBorderRenderer.js';
+import { LabelOverlay } from './LabelOverlay.js';
 
 // Minimum distance between seeds before deconfliction kicks in
 const DEFAULT_MIN_SEED_DISTANCE = 40;
@@ -38,6 +39,9 @@ export class VoronoiCellManager {
 
     // Border renderer for cell boundaries
     this.borderRenderer = new CellBorderRenderer();
+
+    // Label overlay for distance/magnification labels
+    this.labelOverlay = new LabelOverlay();
 
     // Active cells (private - use methods to access)
     this._cells = [];
@@ -341,12 +345,64 @@ export class VoronoiCellManager {
   }
 
   /**
+   * Initialize label overlay with container
+   * @param {HTMLElement} container - The game container element
+   */
+  initLabelOverlay(container) {
+    this.labelOverlay.init(container);
+  }
+
+  /**
+   * Render distance/magnification labels for exclusive (off-screen) cells
+   * @param {number} playerCameraZ - Current player camera Z
+   * @param {number} playerX - Player world X position
+   * @param {number} playerY - Player world Y position
+   */
+  renderLabels(playerCameraZ, playerX, playerY) {
+    this.labelOverlay.clear();
+
+    // Get exclusive target cells (off-screen targets)
+    const exclusiveCells = this._cells.filter(c =>
+      c.type === 'target' &&
+      c.onScreen === false
+    );
+
+    for (const cell of exclusiveCells) {
+      const target = cell.target;
+      if (!target) continue;
+
+      // Compute distance in nautical miles
+      const distFeet = Math.hypot(target.worldX - playerX, target.worldY - playerY);
+      const distNm = distFeet / 6076;
+
+      // Compute magnification (ratio of player camera Z to cell camera Z)
+      const blendedCameraZ = cell.getBlendedTerrainZ(playerCameraZ);
+      const magnification = playerCameraZ / blendedCameraZ;
+
+      // Format: [1.9 nm/1.5x]
+      const text = `[${distNm.toFixed(1)} nm/${magnification.toFixed(1)}x]`;
+
+      // Use cell id as unique identifier for DOM element reuse
+      const cellId = `cell-${cell.id}`;
+      this.labelOverlay.drawBoxedLabel(cellId, text, cell.seed.x, cell.seed.y, {
+        bgColor: 'rgba(0, 0, 0, 0.75)',
+        textColor: '#00ff00',
+        borderColor: '#00ff00'
+      });
+    }
+
+    // Remove labels for cells that no longer exist
+    this.labelOverlay.finalize();
+  }
+
+  /**
    * Clean up resources
    */
   dispose() {
     window.removeEventListener('resize', this._resizeHandler);
     this.viewportManager.dispose();
     this.borderRenderer.dispose();
+    this.labelOverlay.dispose();
   }
 
   // ============================================

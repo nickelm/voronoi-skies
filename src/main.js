@@ -12,6 +12,7 @@ import { LightingConfig, applyTimePreset } from './terrain/lighting.js';
 import { VoronoiCellManager } from './voronoi/VoronoiCellManager.js';
 import { AirbaseCellController } from './voronoi/AirbaseCellController.js';
 import { UiCellManager } from './ui/UiCellManager.js';
+import { FlightControlIndicator } from './ui/FlightControlIndicator.js';
 import { initNoise } from './terrain/noise.js';
 import { AirbaseRegistry, AirbaseRenderer } from './airbase/index.js';
 
@@ -24,6 +25,7 @@ let airbaseCellController = null;
 let uiCellManager = null;
 let airbaseRegistry = null;
 let airbaseRenderer = null;
+let flightControlIndicator = null;
 let lastTime = 0;
 let debugElement = null;
 let currentCameraZ = 500;  // Main camera Z (changes with altitude)
@@ -135,13 +137,19 @@ function init() {
   voronoiCellManager = new VoronoiCellManager(threeRenderer, scene, mainCamera);
   voronoiCellManager.initPlayerCell();
 
+  // Initialize label overlay for distance/magnification labels
+  voronoiCellManager.initLabelOverlay(container);
+
   // Initialize airbase cell controller for dynamic airbase cells
   airbaseCellController = new AirbaseCellController(airbaseRegistry, voronoiCellManager);
 
   // Initialize UI cell manager for 2D orthographic UI cells
   uiCellManager = new UiCellManager(voronoiCellManager);
   // Register a test UI cell at bottom-right (90% x, 85% y)
-  uiCellManager.registerUiCell('test-ui', 0.9, 0.85, 'test');
+  // uiCellManager.registerUiCell('test-ui', 0.9, 0.85, 'test');
+
+  // Initialize flight control indicator (DOM overlay)
+  flightControlIndicator = new FlightControlIndicator({ container });
 
   // Start game loop
   lastTime = performance.now();
@@ -308,13 +316,13 @@ function initLightingControls() {
         }
         break;
 
-      // UI Cell Toggle
-      case 'Digit0':
-        if (uiCellManager) {
-          const isCurrentlyEnabled = uiCellManager.isEnabled('test-ui');
-          uiCellManager.setEnabled('test-ui', !isCurrentlyEnabled);
-        }
-        break;
+      // // UI Cell Toggle
+      // case 'Digit0':
+      //   if (uiCellManager) {
+      //     const isCurrentlyEnabled = uiCellManager.isEnabled('test-ui');
+      //     uiCellManager.setEnabled('test-ui', !isCurrentlyEnabled);
+      //   }
+      //   break;
     }
 
     if (updated) {
@@ -774,6 +782,25 @@ function update(deltaTime) {
   // Update player aircraft
   player.update(deltaTime, inputState);
 
+  // Update flight control indicator
+  if (flightControlIndicator) {
+    flightControlIndicator.update({
+      throttle: player.throttle,
+      stickX: player.stickX,     // Virtual stick position (persistent, additive)
+      stickY: player.pitchAngle, // Direct altitude input visualization
+      status: {
+        afterburner: player.throttle > 1.0,
+        speedBrake: false,  // future
+        flaps: false,       // future
+        gear: false         // future
+      },
+      inputActive: inputState.turnLeft || inputState.turnRight ||
+                   inputState.throttleUp || inputState.throttleDown ||
+                   inputState.climbUp || inputState.climbDown ||
+                   inputState.touchActive
+    });
+  }
+
   // Update chunk system (load/unload based on all viewport regions)
   const viewportRegions = buildViewportRegions();
   chunkManager.update(viewportRegions, player.heading, deltaTime);
@@ -824,63 +851,31 @@ function update(deltaTime) {
 }
 
 /**
- * Calculate chunk loading radius based on camera Z (zoom level)
- * Higher camera Z = more zoomed out = larger visible area = more chunks needed
- *
- * Uses frustum geometry: visible width = 2 * cameraZ * tan(FOV/2)
- * With FOV=60 degrees, tan(30) ≈ 0.577, so visibleWidth ≈ cameraZ * 1.15
- * Chunk size is 2000 units, so radius = ceil(visibleWidth / 2 / chunkSize) + margin
- *
- * @param {number} cameraZ - Camera Z distance (500 = close, 15600 = far)
- * @returns {number} Chunk radius to load
- */
-function getChunkRadiusForCameraZ(cameraZ) {
-  const CHUNK_SIZE = 2000;
-  const FOV_FACTOR = 1.15;  // 2 * tan(30 degrees) for 60-degree FOV
-  const MARGIN = 1;         // Extra chunks for smooth movement
-
-  // Calculate visible terrain half-width
-  const visibleHalfWidth = (cameraZ * FOV_FACTOR) / 2;
-
-  // Convert to chunk radius and add margin
-  const radius = Math.ceil(visibleHalfWidth / CHUNK_SIZE) + MARGIN;
-
-  // Clamp to reasonable range (1-10)
-  return Math.max(1, Math.min(10, radius));
-}
-
-/**
  * Build viewport regions for chunk loading from all active viewports
  * Returns an array of regions that determine which chunks should be loaded.
- * Radius is calculated dynamically based on each viewport's camera Z (zoom level).
  * @returns {Array<{x: number, y: number, radius?: number, priority?: number, id?: string}>}
  */
 function buildViewportRegions() {
   const regions = [];
 
-  // Player viewport - highest priority, radius based on current camera Z
-  const playerRadius = getChunkRadiusForCameraZ(currentCameraZ);
+  // Player viewport - always highest priority, full load radius
   regions.push({
     x: player.x,
     y: player.y,
-    radius: playerRadius,
-    priority: 1,
+    radius: 5,       // Full load radius for player
+    priority: 1,     // Highest priority
     id: 'player'
   });
 
-  // Target cells - lower priority, radius based on each cell's camera Z
+  // Target cells - smaller radius, lower priority
   // Only off-screen targets need separate chunk loading (on-screen share player's view)
   for (const target of testTargets) {
     if (!target.onScreen && target.cell) {
-      // Get the cell's camera Z (stored in terrainZ, defaults to player's if null)
-      const cellCameraZ = target.cell.terrainZ ?? currentCameraZ;
-      const targetRadius = getChunkRadiusForCameraZ(cellCameraZ);
-
       regions.push({
         x: target.worldX,
         y: target.worldY,
-        radius: targetRadius,
-        priority: 2,
+        radius: 2,       // Smaller radius for target viewports
+        priority: 2,     // Lower priority than player
         id: `target_${target.id}`
       });
     }
@@ -906,6 +901,9 @@ function updateAirbaseRendering() {
 function render() {
   // Use Voronoi cell manager for multi-pass stencil rendering
   voronoiCellManager.render();
+
+  // Render distance/magnification labels for off-screen cells
+  voronoiCellManager.renderLabels(currentCameraZ, player.x, player.y);
 }
 
 function updateDebug(deltaTime) {

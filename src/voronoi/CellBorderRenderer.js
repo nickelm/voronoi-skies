@@ -5,6 +5,7 @@
  */
 
 import * as THREE from 'three';
+import { findRadialIntersection, findLongestNonEdgeSegment } from './LabelPositioner.js';
 
 export class CellBorderRenderer {
   constructor() {
@@ -172,6 +173,42 @@ export class CellBorderRenderer {
 
     // Re-enable depth test
     gl.enable(gl.DEPTH_TEST);
+  }
+
+  /**
+   * Compute label position for a cell
+   *
+   * Uses radial intersection: finds where the line from screen center to
+   * the cell's seed intersects the cell border. This gives a unique,
+   * consistent position on the "path" from main viewport to target cell.
+   *
+   * Falls back to longest non-edge segment midpoint if radial fails.
+   *
+   * @param {VoronoiCell} cell - The cell to compute label position for
+   * @returns {{x: number, y: number}|null} Label position in screen coordinates, or null
+   */
+  computeLabelPosition(cell) {
+    if (!cell.polygon) return null;
+
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+
+    // Primary: radial intersection from screen center toward seed
+    const radialResult = findRadialIntersection(
+      cell.polygon,
+      cell.seed.x,
+      cell.seed.y,
+      screenW,
+      screenH
+    );
+
+    if (radialResult) {
+      return { x: radialResult.x, y: radialResult.y };
+    }
+
+    // Fallback: midpoint of longest non-edge segment
+    const fallbackResult = findLongestNonEdgeSegment(cell.polygon, screenW, screenH);
+    return fallbackResult ? { x: fallbackResult.x, y: fallbackResult.y } : null;
   }
 
   /**

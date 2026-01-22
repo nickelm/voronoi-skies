@@ -69,6 +69,7 @@ export function getInputState() {
     turnRight: keyTurnRight || touchTurnRight,
     climbUp: keyClimbUp,
     climbDown: keyClimbDown,
+    centerStick: isKeyDown('Space'),  // Center turn stick
     lock: isKeyDown('Space'),
     fire: isKeyDown('KeyF'),
     advanceTime: isKeyDown('KeyT'),

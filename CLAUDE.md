@@ -10,174 +10,198 @@ Voronoi Skies is a roguelite air combat game combining BVR (Beyond Visual Range)
 
 - **Three.js** with WebGL2 (required)
 - **d3-delaunay** for Voronoi tessellation
+- **simplex-noise** for procedural terrain generation
 - **Vite** for build/dev server
 - **Vanilla JS** (no React, no heavy frameworks)
 - **GitHub Pages** for deployment
 
-## Architecture
+## Current State
+
+### Completed Systems
+
+**Terrain Generation**
+- Procedural Voronoi terrain with biomes (ocean, coastal, plains, forest, mountain, snow)
+- Zone-based elevation: continental noise → regional → local → ridged mountains
+- Delaunay triangulation with 3D elevation and smooth vertex normals
+- Web worker architecture for chunk generation (zero-copy transfer via Transferable arrays)
+- Chunk loading system with priority queue (direction-aware loading)
+- GPU lighting via Three.js (directional + hemisphere + ambient)
+- Time-of-day presets (dawn, noon, night) with sky/fog color sync
+- Ambient occlusion baked into vertex colors
+
+**Voronoi Split-Screen Viewports**
+- Two-phase stencil rendering (write all masks, then render all scenes)
+- Mixed 2D/3D cells: perspective cameras for world views, orthographic for UI instruments
+- Viewport offset technique for 3D cells (camera center → seed position)
+- Frustum adjustment technique for 2D UI cells
+- On-screen target merging (visible targets share player's view)
+- Zoom blending as targets approach screen edge
+- Seed deconfliction for overlapping off-screen targets
+- Raw WebGL stencil calls (Three.js material properties unreliable)
+
+**Flight & Rendering**
+- Perspective camera with altitude-based terrain scaling
+- Aircraft sprite with bank/pitch visual tilt
+- Shadow with altitude-based offset
+- Basic WASD flight controls
+
+### Architecture
 
 ```
 src/
-├── core/           # Renderer, game loop, camera management
-├── simulation/     # Flight model, physics, entity state
-├── voronoi/        # Cell management, tessellation, seed positioning
-├── terrain/        # Voronoi terrain shader, biomes, procedural generation
-├── combat/         # Radar modes, missiles, damage model
-├── navigation/     # TACAN, waypoints, approach systems
-├── ui/             # HUD, CDI overlay, menus
-├── audio/          # Engine sounds, RWR tones, radio
-├── data/           # Aircraft stats, weapons, scenarios
-└── util/           # Math helpers, coordinate transforms
+├── main.js              # Game loop, lighting setup, input handling
+├── renderer.js          # Three.js setup, altitude zoom
+├── input.js             # Keyboard state management
+├── voronoi.js           # d3-delaunay wrapper
+├── entities/
+│   └── aircraft.js      # Player aircraft state and sprite
+├── terrain/
+│   ├── ChunkManager.js  # Chunk lifecycle, worker dispatch
+│   ├── ChunkGenerator.js # Main-thread generation (backup)
+│   ├── ChunkRenderer.js # Three.js mesh building from buffers
+│   ├── Chunk.js         # Single chunk data structure
+│   ├── TerrainRenderer.js # Pivot/terrain group hierarchy
+│   ├── noise.js         # Seeded noise functions (continental, regional, local, ridged)
+│   ├── biomes.js        # Biome classification and colors
+│   ├── lighting.js      # Hillshade, AO config, time presets
+│   └── worker/
+│       └── TerrainWorker.js # Off-thread chunk generation
+├── shaders/
+│   └── blurShader.js    # Altitude blur (currently disabled)
+└── utils/
+    ├── seededRandom.js  # Mulberry32 RNG, jittered grid points
+    └── hash.js          # Deterministic chunk/grid hashing
 ```
 
-## Key Design Decisions
+### Key Files
 
-### Rendering
+| File | Purpose |
+|------|---------|
+| `spec-voronoi-viewport-implementation.md` | Comprehensive viewport system spec |
+| `spec-control-ui.md` | Input and UI design specification |
+| `voronoi-skies-gdd.md` | Game design document |
 
-- **Perspective camera:** Top-down view with true 3D depth
-- **2D sprites as billboards:** Aircraft are pixel art textures on planes facing camera
-- **Voronoi cells via stencil masking:** Each cell renders at native resolution using scissor rect (AABB) + stencil (polygon shape)
-- **Fullscreen fast path:** Single cell = no stencil overhead, just render
-- **Terrain:** Flat plane at y=0 with fragment shader generating Voronoi biomes
-
-### Coordinate System
+## Coordinate System
 
 - **World units:** 1 unit = 1 foot
-- **Y-axis:** Altitude (up)
-- **X/Z plane:** Horizontal world space
-- **Heading:** Radians, 0 = north (+Z), clockwise positive
+- **Y-axis in Three.js:** Up (altitude for camera positioning)
+- **Z-axis in terrain:** Elevation (terrain mesh uses X/Y plane, Z for height)
+- **Heading:** Radians, 0 = north (+Y in terrain space), clockwise positive
 
-### Voronoi Cell System
+## Key Implementation Details
 
-Cells are screen-space regions rendered via stencil buffer:
+### Stencil Rendering (Critical)
 
+The Voronoi viewport system uses raw WebGL for stencil operations:
+
+```javascript
+// Phase 1: Write ALL masks first
+for (const cell of cells) {
+  gl.stencilFunc(gl.ALWAYS, cell.refValue, 0xFF);
+  gl.stencilOp(gl.REPLACE, gl.REPLACE, gl.REPLACE);
+  // render mask geometry
+}
+
+// Phase 2: Render ALL scenes
+for (const cell of cells) {
+  gl.stencilFunc(gl.EQUAL, cell.refValue, 0xFF);
+  gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+  // render scene with cell's camera
+}
 ```
-Fullscreen (default) → Radar lock acquired → Cell appears for target
-                     → TACAN selected → Cell appears for airport
-                     → Radio transmission → Cell appears for speaker
-```
 
-**Seed positioning:**
-- Player seed: bottom-center, shifts away from threat centroid
-- Target seeds: positioned by bearing from player
-- Distance encoded in seed position (closer = seed nearer center = larger cell)
+**Do NOT use** Three.js material stencil properties (`material.stencilWrite`, etc.)—they interfere with WebGL state.
 
-**Rendering pipeline:**
-1. Compute Voronoi from seeds (d3-delaunay)
-2. For each cell: scissor to AABB, stencil to polygon, render scene with cell's camera
-3. Render borders on top
-4. Render HUD overlays
+### Camera Techniques
 
-### Flight Model
+| Cell Type | Technique | How It Works |
+|-----------|-----------|--------------|
+| 3D world | Viewport offset | Shift viewport position so camera center aligns with seed |
+| 2D UI | Frustum adjustment | Adjust ortho camera bounds so origin maps to seed position |
 
-- **Energy model:** Speed + altitude tradeable
-- **PID-style smoothing:** No instant snapping; commands interpolate
-- **Stall and limits:** Below min speed = loss of control; excessive G = damage
+### Chunk Loading
 
-### Camera Per Cell
-
-Each world-view cell has its own PerspectiveCamera:
-
-- **Player cell:** Above player, rotates with heading, altitude-reactive FOV
-- **Target cells:** Above target, zoom based on lock quality (STT > TWS > search)
-- **TACAN cell:** Above airport, zoom based on distance
-
-## File Structure
-
-- **Classes:** PascalCase (`VoronoiManager.js`, `FlightModel.js`)
-- **Data/utils:** camelCase (`aircraft.js`, `mathUtils.js`)
-- **Shaders:** lowercase with extension (`terrain.frag`, `terrain.vert`)
-- **Specs/docs:** kebab-case markdown (`spec-voronoi-viewports.md`)
+- Chunks are 2000×2000 world units
+- Grid spacing: 25 units (~6400 triangles per chunk)
+- Load radius: 5 chunks (11×11 grid for high altitude)
+- Web worker generates geometry, returns Transferable Float32Arrays
+- Priority queue favors chunks in flight direction
 
 ## Coding Conventions
 
 - ES6 modules, simple classes
 - No TypeScript (vanilla JS)
 - JSDoc comments for public methods
-- Keep modules focused: one primary class per file
+- One primary class per file
 - Minimal dependencies
 
-## Common Tasks
+### Naming
 
-### Adding a Voronoi cell type
+- **Classes:** PascalCase (`ChunkManager.js`, `Aircraft.js`)
+- **Utils/data:** camelCase (`seededRandom.js`, `hash.js`)
+- **Specs:** kebab-case (`spec-voronoi-viewport-implementation.md`)
 
-1. Define cell type in `voronoi/CellTypes.js`
-2. Add seed positioning logic in `voronoi/SeedPositioner.js`
-3. Add camera setup in `voronoi/CellCamera.js`
-4. Add any overlay content (CDI, portrait) in `ui/`
-
-### Adding an aircraft type
-
-1. Add performance data to `data/aircraft.js`
-2. Add sprite to `public/sprites/`
-3. Ensure flight model constants are reasonable
-
-### Adding terrain biome
-
-1. Modify fragment shader in `terrain/terrain.frag`
-2. Add color palette for biome
-3. Update noise thresholds for biome distribution
-
-### Adding a navigation aid
-
-1. Define data structure in `navigation/`
-2. Add cell behavior in `voronoi/`
-3. Add overlay (CDI, etc.) in `ui/`
-
-## Shader Conventions
-
-Terrain is rendered via fragment shader on a flat plane:
-
-- Uniforms prefixed with `u` (`uTime`, `uSeed`, `uWorldOffset`)
-- Varyings prefixed with `v` (`vUv`, `vWorldPos`)
-- Keep shaders simple; debug on CPU first if possible
-- Target WebGL2 (GLSL ES 3.0)
-
-## Testing Locally
+## Development Commands
 
 ```bash
 npm install
-npm run dev
+npm run dev      # Dev server at localhost:5173
+npm run build    # Production build to dist/
+npm run preview  # Preview production build
 ```
 
-Opens at `http://localhost:5173/`
+## Current Controls
 
-## Build for Production
+| Key | Function |
+|-----|----------|
+| W/S | Throttle up/down |
+| A/D | Turn left/right |
+| Q/E | Descend/climb |
+| 1/2/3 | Time preset (dawn/noon/night) |
+| L/K/I/U | Lighting adjustments (debug) |
 
-```bash
-npm run build
-```
+## Next Development Phase
 
-Output in `dist/`. Deploy to GitHub Pages.
+**Phase 2: Controls and UI**
 
-## Reference Documents
+Per `spec-control-ui.md`:
+- Virtual stick with position hold (A/D deflect, C centers)
+- Throttle with afterburner zone (Shift held)
+- Control indicators (stick position, throttle bar)
+- Radial menus (right-click context)
+- Minimap (2D canvas overlay)
+- Panel system with fade-on-idle
 
-- **Game Design Document:** `docs/voronoi-skies-gdd.md`
-- **Voronoi Viewport Spec:** `docs/spec-voronoi-viewports.md`
-- **TACAN Approach Spec:** `docs/spec-tacan-approach.md`
+**Phase 3: Flight Model**
 
-## Current Development Phase
+Per GDD:
+- Energy model (speed ↔ altitude trade)
+- Turn rate based on speed and G
+- Stall behavior below minimum speed
+- Structural limits (G damage)
 
-**Phase 0: Foundation**
-- Three.js scene with perspective camera
-- Voronoi terrain shader (biomes, day/night)
-- Aircraft billboard sprite
-- Basic flight controls
-- Shadow beneath aircraft
+## Known Issues / TODOs
 
-**Phase 1: Voronoi Split-Screen**
-- Stencil + scissor cell rendering
-- Player cell + one target cell
-- Dynamic seed positioning
-- Border rendering
+1. **Multi-center chunk loading:** Target cells viewing distant positions need their own terrain. `ChunkManager` currently only loads around player.
 
-**Next:** TACAN approach as first cell implementation (navigation before combat)
+2. **Visibility hysteresis:** Targets at screen edge may flicker between on-screen/off-screen. Need deadzone.
+
+3. **Cell size limits:** No enforcement of minimum cell size or maximum cell count.
+
+4. **Distance labels:** Cell boundaries should display range to target.
 
 ## What NOT to Do
 
 - Don't use React, Vue, or Angular
-- Don't fall back to WebGL1 (WebGL2 required for stencil/texture features)
+- Don't fall back to WebGL1 (WebGL2 required for stencil)
 - Don't render cells to textures (use stencil masking at native resolution)
+- Don't use Three.js material stencil properties (use raw GL)
 - Don't add networked multiplayer (not in scope)
-- Don't model stealth or 5th-gen aircraft (keeps scope manageable)
 - Don't anti-alias sprites (preserve 8-bit hard edges)
+- Don't use `scene.background` with stencil rendering (causes corruption)
+
+## Reference
+
+- **GDD:** `docs/voronoi-skies-gdd.md` — Full game design
+- **Viewport Spec:** `docs/spec-voronoi-viewport.md` — Stencil rendering details
+- **Control Spec:** `docs/spec-control-ui.md` — Input and UI design

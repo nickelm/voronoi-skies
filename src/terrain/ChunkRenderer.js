@@ -17,10 +17,7 @@ export class ChunkRenderer {
     this.cellMaterial = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      flatShading: true,  // Use face normals for flat-shaded look
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1
+      flatShading: true  // Use face normals for flat-shaded look
     });
 
     this.edgeMaterial = new THREE.LineBasicMaterial({
@@ -249,10 +246,7 @@ export class ChunkRenderer {
     const material = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      flatShading: false,  // Smooth shading with interpolated vertex normals
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1
+      flatShading: false  // Smooth shading with interpolated vertex normals
     });
 
     return new THREE.Mesh(geometry, material);
@@ -278,10 +272,7 @@ export class ChunkRenderer {
     const material = new THREE.MeshLambertMaterial({
       vertexColors: true,
       side: THREE.DoubleSide,
-      flatShading: false, // Smooth shading with interpolated vertex normals
-      polygonOffset: true,
-      polygonOffsetFactor: 1,
-      polygonOffsetUnits: 1
+      flatShading: false  // Smooth shading with interpolated vertex normals
     });
 
     const mesh = new THREE.Mesh(geometry, material);

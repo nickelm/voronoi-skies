@@ -6,15 +6,27 @@
 [X] Make terrain move rather than the camera
 [X] Variable altitude for each Voronoi cell
 [X] Mouse wheel to control altitude
-[ ] Reset aircraft size
-[ ] Distance and magnification labels for dividing lines
+[X] Reset aircraft size
+[X] Distance and magnification labels for dividing lines
 [X] 2D UI cells
 [X] Terrain chunking per cell
 [ ] Allow for controlling centering of target cells
 
-# UI components
+# Controls and UI components
+[X] Analog flight stick - visual (keyboard control)
+[X] Throttle - visual (keyboard control)
+[ ] Add touch for flight control UI
 [ ] Explore HTML UI components
 
 # Airbase and landing
-[ ] TACAN instrument cell
-[ ] 
+[ ] TACAN instrument panel
+
+# Graphics
+[ ] Prevent z-fighting for terrain
+
+# Terrain generation
+[ ] Improve ocean and continent generation
+
+# Flight Model
+[ ] Full energy-based flight model
+[ ] Add F-16 flight model

@@ -50,7 +50,8 @@ export function init(container) {
   // Create WebGL renderer with stencil buffer for Voronoi cell masking
   renderer = new THREE.WebGLRenderer({
     antialias: false,
-    stencil: true  // Enable stencil buffer for cell masking
+    stencil: true,  // Enable stencil buffer for cell masking
+    logarithmicDepthBuffer: true  // Better depth precision at distance
   });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setPixelRatio(1); // Keep pixelated look
