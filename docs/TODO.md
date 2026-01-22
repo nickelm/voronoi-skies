@@ -17,8 +17,10 @@
 [X] Throttle - visual (keyboard control)
 [ ] Add touch for flight control UI
 [ ] Explore HTML UI components
+[ ] Fix the camera movement
 
 # Airbase and landing
+[ ] Correct airbase approach
 [ ] TACAN instrument panel
 
 # Graphics
@@ -26,7 +28,10 @@
 
 # Terrain generation
 [ ] Improve ocean and continent generation
+[ ] Add rivers
+[ ] Extract into separate terrain generation module
 
 # Flight Model
 [ ] Full energy-based flight model
 [ ] Add F-16 flight model
+[ ] Add MiG-29 flight model
