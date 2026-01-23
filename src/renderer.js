@@ -185,3 +185,32 @@ export function clearBuffers(color = true, depth = true, stencil = true) {
     renderer.clear(color, depth, stencil);
   }
 }
+
+/**
+ * Dispose of renderer and clean up resources
+ */
+export function dispose() {
+  if (composer) {
+    composer.dispose();
+    composer = null;
+  }
+  if (blurPass) {
+    blurPass = null;
+  }
+  if (renderer) {
+    renderer.dispose();
+    if (renderer.domElement && renderer.domElement.parentNode) {
+      renderer.domElement.parentNode.removeChild(renderer.domElement);
+    }
+    renderer = null;
+  }
+  if (scene) {
+    // Clear scene children
+    while (scene.children.length > 0) {
+      scene.remove(scene.children[0]);
+    }
+    scene = null;
+  }
+  camera = null;
+  currentCameraZ = CAMERA_Z_CLOSE;
+}
