@@ -83,7 +83,7 @@ src/
 
 ## Coordinate System
 
-- **World units:** 1 unit = 1 foot
+- **World units:** 1 unit = 1 meter
 - **Y-axis in Three.js:** Up (altitude for camera positioning)
 - **Z-axis in terrain:** Elevation (terrain mesh uses X/Y plane, Z for height)
 - **Heading:** Radians, 0 = north (+Y in terrain space), clockwise positive

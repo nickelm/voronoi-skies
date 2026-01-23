@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Island Generator - Voronoi Skies</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #0a0a12;
+      overflow: hidden;
+      font-family: 'Courier New', monospace;
+      display: flex;
+    }
+
+    /* Sidebar */
+    #sidebar {
+      width: 280px;
+      min-width: 280px;
+      height: 100vh;
+      background: #12121a;
+      border-right: 1px solid #2a2a3a;
+      display: flex;
+      flex-direction: column;
+      z-index: 100;
+      overflow-y: auto;
+    }
+
+    #sidebar h1 {
+      color: #6c6;
+      font-size: 16px;
+      padding: 16px;
+      border-bottom: 1px solid #2a2a3a;
+      background: #0e0e16;
+    }
+
+    /* Controls section */
+    #controls {
+      padding: 16px;
+      border-bottom: 1px solid #2a2a3a;
+    }
+
+    .control-group {
+      margin-bottom: 14px;
+    }
+
+    .control-group:last-child {
+      margin-bottom: 0;
+    }
+
+    .control-group label {
+      display: block;
+      color: #888;
+      font-size: 11px;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .control-group input,
+    .control-group select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #1a1a24;
+      border: 1px solid #2a2a3a;
+      border-radius: 4px;
+      color: #4a4;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+    }
+
+    .control-group input:focus,
+    .control-group select:focus {
+      outline: none;
+      border-color: #4a4;
+    }
+
+    .control-group input[type="number"] {
+      -moz-appearance: textfield;
+    }
+
+    .control-group input::-webkit-outer-spin-button,
+    .control-group input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .seed-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .seed-row input {
+      flex: 1;
+    }
+
+    #random-seed-btn {
+      padding: 8px 12px;
+      background: #1a1a24;
+      border: 1px solid #2a2a3a;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    #random-seed-btn:hover {
+      background: #2a2a34;
+      border-color: #4a4;
+    }
+
+    #random-seed-btn:active {
+      transform: scale(0.95);
+    }
+
+    #generate-btn {
+      width: 100%;
+      padding: 12px;
+      margin-top: 8px;
+      background: #2a4a2a;
+      border: 1px solid #4a4;
+      border-radius: 4px;
+      color: #6c6;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    #generate-btn:hover {
+      background: #3a5a3a;
+    }
+
+    #generate-btn:active {
+      transform: scale(0.98);
+    }
+
+    #generate-btn:disabled {
+      background: #1a2a1a;
+      border-color: #333;
+      color: #555;
+      cursor: not-allowed;
+    }
+
+    /* Collapsible sections */
+    .collapsible-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      padding: 8px 0;
+      margin-top: 10px;
+      border-top: 1px solid #2a2a3a;
+    }
+
+    .collapsible-header h3 {
+      color: #888;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .collapsible-header .toggle {
+      color: #666;
+      font-size: 10px;
+      transition: transform 0.2s;
+    }
+
+    .collapsible-header.open .toggle {
+      transform: rotate(180deg);
+    }
+
+    .collapsible-content {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease-out;
+    }
+
+    .collapsible-content.open {
+      max-height: 500px;
+    }
+
+    /* Range slider styling */
+    .control-group input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      background: #1a1a24;
+      border: 1px solid #2a2a3a;
+      border-radius: 3px;
+      padding: 0;
+    }
+
+    .control-group input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: #4a4;
+      border-radius: 50%;
+      cursor: pointer;
+    }
+
+    .control-group input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      background: #4a4;
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+    }
+
+    .range-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .range-row input[type="range"] {
+      flex: 1;
+    }
+
+    .range-value {
+      color: #4a4;
+      font-size: 12px;
+      min-width: 45px;
+      text-align: right;
+    }
+
+    /* Stats section */
+    #stats {
+      padding: 8px 16px;
+      border-bottom: 1px solid #2a2a3a;
+    }
+
+    #stats .collapsible-header {
+      margin-top: 0;
+      padding: 8px 0;
+      border-top: none;
+    }
+
+    #stats-content {
+      color: #666;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    #stats-content .stat-row {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    #stats-content .stat-label {
+      color: #888;
+    }
+
+    #stats-content .stat-value {
+      color: #4a4;
+    }
+
+    #stats-content .stat-divider {
+      border-top: 1px solid #2a2a3a;
+      margin: 8px 0;
+    }
+
+    /* Hover info section */
+    #hover-info {
+      padding: 8px 16px;
+    }
+
+    #hover-info .collapsible-header {
+      margin-top: 0;
+      padding: 8px 0;
+      border-top: none;
+    }
+
+    #hover-content {
+      color: #666;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    #hover-content .stat-row {
+      display: flex;
+      justify-content: space-between;
+    }
+
+    #hover-content .stat-label {
+      color: #888;
+    }
+
+    #hover-content .stat-value {
+      color: #4a4;
+    }
+
+    /* Map container */
+    #map-container {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    canvas {
+      display: block;
+    }
+
+    /* Loading overlay */
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #4a4;
+      font-size: 16px;
+      z-index: 50;
+      background: rgba(10, 10, 18, 0.9);
+      padding: 20px 30px;
+      border-radius: 8px;
+      border: 1px solid #2a2a3a;
+    }
+
+    #loading.error {
+      color: #f44;
+      border-color: #422;
+    }
+
+    #loading.hidden {
+      display: none;
+    }
+
+    /* Help text */
+    #help-text {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      color: #555;
+      font-size: 11px;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <h1>Island Generator</h1>
+
+    <!-- Controls -->
+    <div id="controls">
+      <div class="control-group">
+        <label for="seed">Seed</label>
+        <div class="seed-row">
+          <input type="number" id="seed" value="42">
+          <button type="button" id="random-seed-btn" title="Random seed">🎲</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label for="region-count">Region Count</label>
+        <input type="number" id="region-count" value="2000" min="100" max="10000" step="100">
+      </div>
+
+      <div class="control-group">
+        <label for="radius">Radius (meters)</label>
+        <input type="number" id="radius" value="15000" min="5000" max="50000" step="1000">
+      </div>
+
+      <div class="control-group">
+        <label for="lloyd-iterations">Lloyd Iterations</label>
+        <input type="number" id="lloyd-iterations" value="2" min="0" max="5">
+      </div>
+
+      <div class="control-group">
+        <label for="template">Template</label>
+        <select id="template">
+          <option value="custom" selected>Custom</option>
+          <option value="tropical">Tropical Volcanic</option>
+          <option value="archipelago">Archipelago</option>
+          <option value="continental">Continental</option>
+        </select>
+      </div>
+
+      <!-- Elevation Tuning (collapsible) -->
+      <div class="collapsible-header" id="tuning-header">
+        <h3>Elevation Tuning</h3>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="collapsible-content" id="tuning-content">
+        <div class="control-group">
+          <label for="shape-variation">Shape Variation</label>
+          <div class="range-row">
+            <input type="range" id="shape-variation" value="0.3" min="0" max="0.5" step="0.05">
+            <span class="range-value" id="shape-variation-value">0.30</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="interior-boost">Interior Boost</label>
+          <div class="range-row">
+            <input type="range" id="interior-boost" value="0.35" min="0" max="0.5" step="0.05">
+            <span class="range-value" id="interior-boost-value">0.35</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="falloff-start">Falloff Start</label>
+          <div class="range-row">
+            <input type="range" id="falloff-start" value="0.7" min="0.5" max="0.85" step="0.05">
+            <span class="range-value" id="falloff-start-value">0.70</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="noise-amplitude">Noise Amplitude</label>
+          <div class="range-row">
+            <input type="range" id="noise-amplitude" value="0.4" min="0.2" max="0.6" step="0.05">
+            <span class="range-value" id="noise-amplitude-value">0.40</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="noise-frequency">Noise Frequency</label>
+          <div class="range-row">
+            <input type="range" id="noise-frequency" value="0.0003" min="0.0001" max="0.0005" step="0.00005">
+            <span class="range-value" id="noise-frequency-value">0.00030</span>
+          </div>
+        </div>
+      </div>
+
+      <button id="generate-btn">Generate Island</button>
+    </div>
+
+    <!-- Stats (collapsible) -->
+    <div id="stats">
+      <div class="collapsible-header open" id="stats-header">
+        <h3>Island Stats</h3>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="collapsible-content open" id="stats-content-wrapper">
+        <div id="stats-content">
+          Generate an island to see stats
+        </div>
+      </div>
+    </div>
+
+    <!-- Hover Info (collapsible) -->
+    <div id="hover-info">
+      <div class="collapsible-header open" id="hover-header">
+        <h3>Region Info</h3>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="collapsible-content open" id="hover-content-wrapper">
+        <div id="hover-content">
+          Hover over map to inspect regions
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Map Container -->
+  <div id="map-container">
+    <canvas id="map"></canvas>
+    <div id="loading">Generating island...</div>
+    <div id="help-text">Drag to pan | Scroll to zoom</div>
+  </div>
+
+  <script type="module">
+    import { generate } from '../src/terrain/island/IslandGenerator.js';
+    import { StrategicMapRenderer, StrategicMapControls } from '../src/ui/strategic/index.js';
+
+    // Template presets
+    const TEMPLATES = {
+      custom: null,
+      tropical: {
+        regionCount: 2000,
+        radius: 15000,
+        lloydIterations: 2,
+        shapeVariation: 0.25,
+        interiorBoost: 0.4,
+        falloffStart: 0.6,
+        noiseAmplitude: 0.4,
+        noiseFrequency: 0.0003
+      },
+      archipelago: {
+        regionCount: 3000,
+        radius: 25000,
+        lloydIterations: 1,
+        shapeVariation: 0.45,
+        interiorBoost: 0.1,
+        falloffStart: 0.75,
+        noiseAmplitude: 0.5,
+        noiseFrequency: 0.00025
+      },
+      continental: {
+        regionCount: 4000,
+        radius: 30000,
+        lloydIterations: 2,
+        shapeVariation: 0.3,
+        interiorBoost: 0.35,
+        falloffStart: 0.6,
+        noiseAmplitude: 0.4,
+        noiseFrequency: 0.0002
+      }
+    };
+
+    // DOM elements
+    const canvas = document.getElementById('map');
+    const container = document.getElementById('map-container');
+    const loadingEl = document.getElementById('loading');
+    const statsEl = document.getElementById('stats-content');
+    const hoverEl = document.getElementById('hover-content');
+    const generateBtn = document.getElementById('generate-btn');
+
+    const seedInput = document.getElementById('seed');
+    const randomSeedBtn = document.getElementById('random-seed-btn');
+    const regionCountInput = document.getElementById('region-count');
+    const radiusInput = document.getElementById('radius');
+    const lloydInput = document.getElementById('lloyd-iterations');
+    const templateSelect = document.getElementById('template');
+
+    // Elevation tuning inputs
+    const shapeVariationInput = document.getElementById('shape-variation');
+    const interiorBoostInput = document.getElementById('interior-boost');
+    const falloffStartInput = document.getElementById('falloff-start');
+    const noiseAmplitudeInput = document.getElementById('noise-amplitude');
+    const noiseFrequencyInput = document.getElementById('noise-frequency');
+
+    // Collapsible section
+    const tuningHeader = document.getElementById('tuning-header');
+    const tuningContent = document.getElementById('tuning-content');
+
+    // State
+    let renderer = null;
+    let controls = null;
+
+    /**
+     * Resize canvas to container
+     */
+    function resizeCanvas() {
+      canvas.width = container.clientWidth;
+      canvas.height = container.clientHeight;
+      if (renderer) {
+        renderer.resize();
+      }
+    }
+
+    /**
+     * Show loading state
+     */
+    function showLoading(message = 'Generating island...') {
+      loadingEl.textContent = message;
+      loadingEl.classList.remove('hidden', 'error');
+      generateBtn.disabled = true;
+    }
+
+    /**
+     * Hide loading state
+     */
+    function hideLoading() {
+      loadingEl.classList.add('hidden');
+      generateBtn.disabled = false;
+    }
+
+    /**
+     * Show error state
+     */
+    function showError(message) {
+      loadingEl.textContent = 'Error: ' + message;
+      loadingEl.classList.remove('hidden');
+      loadingEl.classList.add('error');
+      generateBtn.disabled = false;
+    }
+
+    /**
+     * Update stats panel
+     */
+    function updateStats(island, elapsed) {
+      const landRegions = island.getLandRegions();
+      const oceanRegions = island.getOceanRegions();
+      const lakeRegions = island.getLakeRegions ? island.getLakeRegions() : [];
+      const coastlines = island.getCoastlineEdges();
+      const rivers = island.getRiverEdges ? island.getRiverEdges() : [];
+      const landRatio = (landRegions.length / island.regions.length * 100).toFixed(1);
+
+      // Calculate moisture stats
+      const moistures = island.regions.map(r => r.moisture || 0);
+      const minMoisture = Math.min(...moistures).toFixed(2);
+      const maxMoisture = Math.max(...moistures).toFixed(2);
+
+      statsEl.innerHTML = `
+        <div class="stat-row">
+          <span class="stat-label">Total Regions</span>
+          <span class="stat-value">${island.regions.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Land Regions</span>
+          <span class="stat-value">${landRegions.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Ocean Regions</span>
+          <span class="stat-value">${oceanRegions.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Lake Regions</span>
+          <span class="stat-value" style="color: #1a8a8a">${lakeRegions.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Land Ratio</span>
+          <span class="stat-value">${landRatio}%</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-row">
+          <span class="stat-label">Coastline Edges</span>
+          <span class="stat-value">${coastlines.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">River Edges</span>
+          <span class="stat-value" style="color: #48a">${rivers.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Corners</span>
+          <span class="stat-value">${island.corners.length}</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-row">
+          <span class="stat-label">Moisture Range</span>
+          <span class="stat-value">${minMoisture} - ${maxMoisture}</span>
+        </div>
+        <div class="stat-divider"></div>
+        <div class="stat-row">
+          <span class="stat-label">Generation Time</span>
+          <span class="stat-value">${elapsed.toFixed(0)}ms</span>
+        </div>
+      `;
+    }
+
+    /**
+     * Update hover info panel
+     */
+    function updateHoverInfo(region) {
+      if (!region) {
+        hoverEl.innerHTML = '<span class="stat-label">Hover over map to inspect regions</span>';
+        return;
+      }
+
+      const type = region.isLake ? 'Lake' : (region.isOcean ? 'Ocean' : 'Land');
+      const typeColor = region.isLake ? '#1a8a8a' : (region.isOcean ? '#48a' : '#4a4');
+      const biome = region.biome || 'unknown';
+      const biomeFormatted = biome.replace(/_/g, ' ');
+      const moisture = region.moisture !== undefined ? region.moisture.toFixed(2) : 'N/A';
+
+      hoverEl.innerHTML = `
+        <div class="stat-row">
+          <span class="stat-label">Region ID</span>
+          <span class="stat-value">#${region.id}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Type</span>
+          <span class="stat-value" style="color: ${typeColor}">${type}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Biome</span>
+          <span class="stat-value" style="text-transform: capitalize">${biomeFormatted}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Elevation</span>
+          <span class="stat-value">${region.elevation.toFixed(4)}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Moisture</span>
+          <span class="stat-value">${moisture}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Neighbors</span>
+          <span class="stat-value">${region.neighbors.length}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Centroid</span>
+          <span class="stat-value">${region.centroid[0].toFixed(0)}, ${region.centroid[1].toFixed(0)}</span>
+        </div>
+      `;
+    }
+
+    /**
+     * Generate island with current parameters
+     */
+    function generateIsland() {
+      showLoading();
+
+      // Use setTimeout to allow UI to update before heavy computation
+      setTimeout(() => {
+        try {
+          const startTime = performance.now();
+
+          const config = {
+            seed: parseInt(seedInput.value) || 42,
+            regionCount: parseInt(regionCountInput.value) || 2000,
+            radius: parseInt(radiusInput.value) || 15000,
+            lloydIterations: parseInt(lloydInput.value) || 2,
+            // Elevation tuning
+            shapeVariation: parseFloat(shapeVariationInput.value) || 0.3,
+            interiorBoost: parseFloat(interiorBoostInput.value) || 0.25,
+            falloffStart: parseFloat(falloffStartInput.value) || 0.7,
+            noiseAmplitude: parseFloat(noiseAmplitudeInput.value) || 0.4,
+            noiseFrequency: parseFloat(noiseFrequencyInput.value) || 0.0003
+          };
+
+          const island = generate(config);
+          const elapsed = performance.now() - startTime;
+
+          // Clean up previous renderer/controls
+          if (controls) {
+            controls.dispose();
+          }
+          if (renderer) {
+            renderer.dispose();
+          }
+
+          // Create new renderer
+          renderer = new StrategicMapRenderer({
+            canvas,
+            island
+          });
+
+          // Create new controls
+          controls = new StrategicMapControls(renderer);
+          controls.onRegionHover = updateHoverInfo;
+
+          // Fit and render
+          renderer.fitToIsland();
+
+          // Update stats
+          updateStats(island, elapsed);
+
+          // Reset hover info
+          updateHoverInfo(null);
+
+          // Store for debugging
+          window.island = island;
+          window.renderer = renderer;
+          window.controls = controls;
+
+          hideLoading();
+
+        } catch (error) {
+          console.error('Failed to generate island:', error);
+          showError(error.message);
+        }
+      }, 50);
+    }
+
+    /**
+     * Apply template preset
+     */
+    function applyTemplate(templateName) {
+      const preset = TEMPLATES[templateName];
+      if (!preset) return;
+
+      regionCountInput.value = preset.regionCount;
+      radiusInput.value = preset.radius;
+      lloydInput.value = preset.lloydIterations;
+
+      // Apply elevation tuning values
+      if (preset.shapeVariation !== undefined) {
+        shapeVariationInput.value = preset.shapeVariation;
+        updateRangeDisplay(shapeVariationInput);
+      }
+      if (preset.interiorBoost !== undefined) {
+        interiorBoostInput.value = preset.interiorBoost;
+        updateRangeDisplay(interiorBoostInput);
+      }
+      if (preset.falloffStart !== undefined) {
+        falloffStartInput.value = preset.falloffStart;
+        updateRangeDisplay(falloffStartInput);
+      }
+      if (preset.noiseAmplitude !== undefined) {
+        noiseAmplitudeInput.value = preset.noiseAmplitude;
+        updateRangeDisplay(noiseAmplitudeInput);
+      }
+      if (preset.noiseFrequency !== undefined) {
+        noiseFrequencyInput.value = preset.noiseFrequency;
+        updateRangeDisplay(noiseFrequencyInput);
+      }
+    }
+
+    /**
+     * Update range input display value
+     */
+    function updateRangeDisplay(input) {
+      const valueSpan = document.getElementById(input.id + '-value');
+      if (valueSpan) {
+        const value = parseFloat(input.value);
+        // Format based on magnitude
+        if (value < 0.001) {
+          valueSpan.textContent = value.toFixed(5);
+        } else {
+          valueSpan.textContent = value.toFixed(2);
+        }
+      }
+    }
+
+    // Event listeners
+    generateBtn.addEventListener('click', generateIsland);
+
+    randomSeedBtn.addEventListener('click', () => {
+      seedInput.value = Math.floor(Math.random() * 1000000);
+      generateIsland();
+    });
+
+    templateSelect.addEventListener('change', (e) => {
+      if (e.target.value !== 'custom') {
+        applyTemplate(e.target.value);
+      }
+    });
+
+    // Collapsible section toggles
+    tuningHeader.addEventListener('click', () => {
+      tuningHeader.classList.toggle('open');
+      tuningContent.classList.toggle('open');
+    });
+
+    const statsHeader = document.getElementById('stats-header');
+    const statsContentWrapper = document.getElementById('stats-content-wrapper');
+    statsHeader.addEventListener('click', () => {
+      statsHeader.classList.toggle('open');
+      statsContentWrapper.classList.toggle('open');
+    });
+
+    const hoverHeader = document.getElementById('hover-header');
+    const hoverContentWrapper = document.getElementById('hover-content-wrapper');
+    hoverHeader.addEventListener('click', () => {
+      hoverHeader.classList.toggle('open');
+      hoverContentWrapper.classList.toggle('open');
+    });
+
+    // Range input value displays
+    const rangeInputs = [shapeVariationInput, interiorBoostInput, falloffStartInput, noiseAmplitudeInput, noiseFrequencyInput];
+    rangeInputs.forEach(input => {
+      input.addEventListener('input', () => {
+        updateRangeDisplay(input);
+        templateSelect.value = 'custom';
+      });
+    });
+
+    // Reset template to custom when manually changing values
+    [seedInput, regionCountInput, radiusInput, lloydInput].forEach(input => {
+      input.addEventListener('input', () => {
+        templateSelect.value = 'custom';
+      });
+    });
+
+    // Allow Enter key to generate
+    [seedInput, regionCountInput, radiusInput, lloydInput].forEach(input => {
+      input.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          generateIsland();
+        }
+      });
+    });
+
+    // Resize handling
+    window.addEventListener('resize', resizeCanvas);
+
+    // Initial setup
+    resizeCanvas();
+    generateIsland();
+
+    console.log('Island Generator ready. Access via window.island, window.renderer, window.controls');
+  </script>
+</body>
+</html>
