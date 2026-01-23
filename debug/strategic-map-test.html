@@ -383,6 +383,14 @@
         </select>
       </div>
 
+      <div class="control-group">
+        <label for="view-mode">View Mode</label>
+        <select id="view-mode">
+          <option value="strategic" selected>Strategic</option>
+          <option value="terrain">Terrain</option>
+        </select>
+      </div>
+
       <!-- Elevation Tuning (collapsible) -->
       <div class="collapsible-header" id="tuning-header">
         <h3>Elevation Tuning</h3>
@@ -426,6 +434,53 @@
           <div class="range-row">
             <input type="range" id="noise-frequency" value="0.0003" min="0.0001" max="0.0005" step="0.00005">
             <span class="range-value" id="noise-frequency-value">0.00030</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Terrain Preview Settings (collapsible) -->
+      <div class="collapsible-header" id="terrain-header">
+        <h3>Terrain Preview</h3>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="collapsible-content" id="terrain-content">
+        <div class="control-group">
+          <label for="edge-subdivisions">Edge Subdivisions</label>
+          <div class="range-row">
+            <input type="range" id="edge-subdivisions" value="5" min="3" max="10" step="1">
+            <span class="range-value" id="edge-subdivisions-value">5</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="edge-noise-amplitude">Noise Amplitude</label>
+          <div class="range-row">
+            <input type="range" id="edge-noise-amplitude" value="0.25" min="0.1" max="0.5" step="0.05">
+            <span class="range-value" id="edge-noise-amplitude-value">0.25</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="edge-noise-frequency">Noise Frequency</label>
+          <div class="range-row">
+            <input type="range" id="edge-noise-frequency" value="0.001" min="0.0005" max="0.005" step="0.0005">
+            <span class="range-value" id="edge-noise-frequency-value">0.00100</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="light-azimuth">Light Azimuth</label>
+          <div class="range-row">
+            <input type="range" id="light-azimuth" value="315" min="0" max="360" step="15">
+            <span class="range-value" id="light-azimuth-value">315°</span>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="light-elevation">Light Elevation</label>
+          <div class="range-row">
+            <input type="range" id="light-elevation" value="45" min="15" max="75" step="5">
+            <span class="range-value" id="light-elevation-value">45°</span>
           </div>
         </div>
       </div>
@@ -531,6 +586,18 @@
     // Collapsible section
     const tuningHeader = document.getElementById('tuning-header');
     const tuningContent = document.getElementById('tuning-content');
+
+    // View mode
+    const viewModeSelect = document.getElementById('view-mode');
+
+    // Terrain preview inputs
+    const terrainHeader = document.getElementById('terrain-header');
+    const terrainContent = document.getElementById('terrain-content');
+    const edgeSubdivisionsInput = document.getElementById('edge-subdivisions');
+    const edgeNoiseAmplitudeInput = document.getElementById('edge-noise-amplitude');
+    const edgeNoiseFrequencyInput = document.getElementById('edge-noise-frequency');
+    const lightAzimuthInput = document.getElementById('light-azimuth');
+    const lightElevationInput = document.getElementById('light-elevation');
 
     // State
     let renderer = null;
@@ -719,11 +786,23 @@
             renderer.dispose();
           }
 
-          // Create new renderer
+          // Create new renderer with current view mode
           renderer = new StrategicMapRenderer({
             canvas,
-            island
+            island,
+            viewMode: viewModeSelect.value
           });
+
+          // Apply terrain params if in terrain mode
+          if (viewModeSelect.value === 'terrain') {
+            renderer.setTerrainParams({
+              subdivisions: parseInt(edgeSubdivisionsInput.value),
+              noiseAmplitude: parseFloat(edgeNoiseAmplitudeInput.value),
+              noiseFrequency: parseFloat(edgeNoiseFrequencyInput.value),
+              lightAzimuth: parseInt(lightAzimuthInput.value),
+              lightElevation: parseInt(lightElevationInput.value)
+            });
+          }
 
           // Create new controls
           controls = new StrategicMapControls(renderer);
@@ -793,8 +872,15 @@
       const valueSpan = document.getElementById(input.id + '-value');
       if (valueSpan) {
         const value = parseFloat(input.value);
-        // Format based on magnitude
-        if (value < 0.001) {
+        // Format based on input type
+        if (input.id === 'light-azimuth' || input.id === 'light-elevation') {
+          // Degrees with degree symbol
+          valueSpan.textContent = Math.round(value) + '°';
+        } else if (input.id === 'edge-subdivisions') {
+          // Integer
+          valueSpan.textContent = Math.round(value);
+        } else if (value < 0.001) {
+          // Very small numbers
           valueSpan.textContent = value.toFixed(5);
         } else {
           valueSpan.textContent = value.toFixed(2);
@@ -820,6 +906,46 @@
     tuningHeader.addEventListener('click', () => {
       tuningHeader.classList.toggle('open');
       tuningContent.classList.toggle('open');
+    });
+
+    terrainHeader.addEventListener('click', () => {
+      terrainHeader.classList.toggle('open');
+      terrainContent.classList.toggle('open');
+    });
+
+    // View mode change handler
+    viewModeSelect.addEventListener('change', (e) => {
+      if (renderer) {
+        renderer.setViewMode(e.target.value);
+      }
+    });
+
+    // Terrain parameter change handlers
+    function updateTerrainParams() {
+      if (renderer) {
+        renderer.setTerrainParams({
+          subdivisions: parseInt(edgeSubdivisionsInput.value),
+          noiseAmplitude: parseFloat(edgeNoiseAmplitudeInput.value),
+          noiseFrequency: parseFloat(edgeNoiseFrequencyInput.value),
+          lightAzimuth: parseInt(lightAzimuthInput.value),
+          lightElevation: parseInt(lightElevationInput.value)
+        });
+      }
+    }
+
+    const terrainInputs = [
+      edgeSubdivisionsInput,
+      edgeNoiseAmplitudeInput,
+      edgeNoiseFrequencyInput,
+      lightAzimuthInput,
+      lightElevationInput
+    ];
+
+    terrainInputs.forEach(input => {
+      input.addEventListener('input', () => {
+        updateRangeDisplay(input);
+        updateTerrainParams();
+      });
     });
 
     const statsHeader = document.getElementById('stats-header');

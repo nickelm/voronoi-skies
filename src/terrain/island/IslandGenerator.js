@@ -380,6 +380,7 @@ export function generate(config) {
 
   // 15. Build the graph
   const graph = new IslandGraph();
+  graph.seed = seed;  // Store seed for terrain preview mode
   graph.regions = regions;
   graph.edges = edges;
   graph.corners = corners;

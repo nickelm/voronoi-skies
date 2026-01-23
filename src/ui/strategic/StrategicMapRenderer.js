@@ -3,9 +3,15 @@
  *
  * Renders an IslandGraph as a 2D map with biome-based coloring,
  * coastline highlighting, rivers, and support for pan/zoom interaction.
+ *
+ * Supports two view modes:
+ * - 'strategic': Clean polygon rendering (default)
+ * - 'terrain': Organic edges with noise displacement and hillshade
  */
 
 import { getBiomeColor } from '../../terrain/island/BiomeClassifier.js';
+import { EdgeSubdivider } from './EdgeSubdivider.js';
+import { HillshadeCalculator } from './HillshadeCalculator.js';
 
 // Color palette for fallback (when no biome assigned)
 const COLORS = {
@@ -32,6 +38,10 @@ const RIVER_WIDTH_BASE = 1;
 const RIVER_WIDTH_SCALE = 0.015;  // Width increases with flow
 const RIVER_MAX_WIDTH = 6;
 
+// Terrain mode edge rendering
+const EDGE_STROKE_COLOR = 'rgba(30, 30, 30, 0.3)';
+const EDGE_STROKE_WIDTH = 0.5;
+
 export class StrategicMapRenderer {
   /**
    * @param {Object} options
@@ -54,6 +64,24 @@ export class StrategicMapRenderer {
     this.offsetX = 0;
     this.offsetY = 0;
     this.scale = 1; // Pixels per world unit (higher = more zoomed in)
+
+    // View mode: 'strategic' (clean polygons) or 'terrain' (organic edges + hillshade)
+    this.viewMode = options.viewMode || 'strategic';
+
+    // Terrain mode components (lazy initialized)
+    this._edgeSubdivider = null;
+    this._hillshadeCalculator = null;
+    this._terrainInitialized = false;
+    this._edgeLookup = null; // Map from "x1,y1|x2,y2" -> edge
+
+    // Terrain mode parameters
+    this.terrainParams = {
+      subdivisions: 5,
+      noiseAmplitude: 0.25,
+      noiseFrequency: 0.001,
+      lightAzimuth: 315,
+      lightElevation: 45
+    };
   }
 
   /**
@@ -61,9 +89,329 @@ export class StrategicMapRenderer {
    */
   render() {
     this.clear();
-    this.renderRegions();
-    this.renderCoastlines();
-    this.renderRivers();
+
+    if (this.viewMode === 'terrain') {
+      this._renderTerrainMode();
+    } else {
+      // Strategic mode (default)
+      this.renderRegions();
+      this.renderCoastlines();
+      this.renderRivers();
+    }
+  }
+
+  /**
+   * Set view mode
+   * @param {'strategic' | 'terrain'} mode
+   */
+  setViewMode(mode) {
+    if (mode !== this.viewMode) {
+      this.viewMode = mode;
+      if (mode === 'terrain' && !this._terrainInitialized) {
+        this._initTerrainMode();
+      }
+      this.render();
+    }
+  }
+
+  /**
+   * Update terrain parameters
+   * @param {Object} params - Partial parameter updates
+   */
+  setTerrainParams(params) {
+    Object.assign(this.terrainParams, params);
+
+    if (this._edgeSubdivider) {
+      this._edgeSubdivider.setParameters({
+        subdivisions: this.terrainParams.subdivisions,
+        noiseAmplitude: this.terrainParams.noiseAmplitude,
+        noiseFrequency: this.terrainParams.noiseFrequency
+      });
+      // Recompute subdivisions after parameter change
+      this._edgeSubdivider.precompute(
+        this.island.edges,
+        (id) => this.island.getCorner(id)
+      );
+    }
+
+    if (this._hillshadeCalculator) {
+      this._hillshadeCalculator.setParameters({
+        azimuth: this.terrainParams.lightAzimuth,
+        elevation: this.terrainParams.lightElevation
+      });
+      // Recompute hillshade after light direction change
+      this._hillshadeCalculator.precompute(this.island.regions);
+    }
+
+    if (this.viewMode === 'terrain') {
+      this.render();
+    }
+  }
+
+  /**
+   * Initialize terrain mode components
+   */
+  _initTerrainMode() {
+    // Get seed from island (fallback to 42 if not available)
+    const seed = this.island.seed ?? 42;
+
+    this._edgeSubdivider = new EdgeSubdivider({
+      seed: seed,
+      subdivisions: this.terrainParams.subdivisions,
+      noiseAmplitude: this.terrainParams.noiseAmplitude,
+      noiseFrequency: this.terrainParams.noiseFrequency
+    });
+
+    this._hillshadeCalculator = new HillshadeCalculator({
+      azimuth: this.terrainParams.lightAzimuth,
+      elevation: this.terrainParams.lightElevation
+    });
+
+    // Precompute edge subdivisions and hillshade
+    this._edgeSubdivider.precompute(
+      this.island.edges,
+      (id) => this.island.getCorner(id)
+    );
+    this._hillshadeCalculator.precompute(this.island.regions);
+
+    // Build edge lookup by corner positions for displaced polygon rendering
+    this._buildEdgeLookup();
+
+    this._terrainInitialized = true;
+  }
+
+  /**
+   * Build a lookup map from corner position pairs to edges
+   * Used to find edges when constructing displaced region polygons
+   */
+  _buildEdgeLookup() {
+    this._edgeLookup = new Map();
+
+    for (const edge of this.island.edges) {
+      const c0 = this.island.getCorner(edge.corners[0]);
+      const c1 = this.island.getCorner(edge.corners[1]);
+      if (!c0 || !c1) continue;
+
+      // Create keys for both directions
+      const key1 = this._positionPairKey(c0.position, c1.position);
+      const key2 = this._positionPairKey(c1.position, c0.position);
+
+      this._edgeLookup.set(key1, { edge, reversed: false });
+      this._edgeLookup.set(key2, { edge, reversed: true });
+    }
+  }
+
+  /**
+   * Create a lookup key from two positions
+   */
+  _positionPairKey(p1, p2) {
+    // Round to avoid floating point precision issues
+    const r = (v) => Math.round(v * 100) / 100;
+    return `${r(p1[0])},${r(p1[1])}|${r(p2[0])},${r(p2[1])}`;
+  }
+
+  /**
+   * Get displaced polygon vertices for a region
+   * @param {Object} region - Region with vertices array
+   * @returns {number[][]} Array of [x, y] points forming the displaced polygon
+   */
+  _getDisplacedPolygon(region) {
+    const verts = region.vertices;
+    if (!verts || verts.length < 3) return [];
+
+    const displacedPoints = [];
+
+    for (let i = 0; i < verts.length; i++) {
+      const v1 = verts[i];
+      const v2 = verts[(i + 1) % verts.length];
+
+      const key = this._positionPairKey(v1, v2);
+      const edgeInfo = this._edgeLookup.get(key);
+
+      if (edgeInfo) {
+        const path = this._edgeSubdivider.getSubdividedPath(
+          edgeInfo.edge,
+          (id) => this.island.getCorner(id)
+        );
+
+        // Add points, potentially reversed
+        // Skip the last point of each edge to avoid duplicates
+        const pathToAdd = edgeInfo.reversed ? [...path].reverse() : path;
+        for (let j = 0; j < pathToAdd.length - 1; j++) {
+          displacedPoints.push(pathToAdd[j]);
+        }
+      } else {
+        // Fallback: edge not found, use original vertex
+        displacedPoints.push(v1);
+      }
+    }
+
+    return displacedPoints;
+  }
+
+  /**
+   * Render in terrain mode with hillshade and subdivided edges
+   */
+  _renderTerrainMode() {
+    if (!this._terrainInitialized) {
+      this._initTerrainMode();
+    }
+
+    // 1. Render regions with hillshaded biome colors (using displaced boundaries)
+    this._renderHillshadedRegions();
+
+    // 2. Interior edges are now implicit in the displaced polygon boundaries
+    //    No need to render them separately
+
+    // 3. Render rivers along subdivided paths
+    this._renderSubdividedRivers();
+
+    // 4. Render coastlines (bold, last)
+    this._renderSubdividedCoastlines();
+  }
+
+  /**
+   * Render regions with hillshade-modified colors using displaced polygon boundaries
+   */
+  _renderHillshadedRegions() {
+    const ctx = this.ctx;
+
+    for (const region of this.island.regions) {
+      // Get displaced polygon vertices
+      const displacedVerts = this._getDisplacedPolygon(region);
+      if (displacedVerts.length < 3) continue;
+
+      // Get base biome color
+      const baseColor = this.getRegionColor(region);
+
+      // Get hillshade and apply
+      const hillshade = this._hillshadeCalculator.getHillshade(region);
+      const shadedColor = this._hillshadeCalculator.applyToColor(baseColor, hillshade);
+
+      ctx.beginPath();
+      const [sx, sy] = this.worldToScreen(displacedVerts[0]);
+      ctx.moveTo(sx, sy);
+
+      for (let i = 1; i < displacedVerts.length; i++) {
+        const [px, py] = this.worldToScreen(displacedVerts[i]);
+        ctx.lineTo(px, py);
+      }
+
+      ctx.closePath();
+      ctx.fillStyle = shadedColor;
+      ctx.fill();
+    }
+  }
+
+  /**
+   * Render interior edges with subdivided paths (thin, subtle)
+   */
+  _renderSubdividedEdges() {
+    const ctx = this.ctx;
+
+    ctx.strokeStyle = EDGE_STROKE_COLOR;
+    ctx.lineWidth = EDGE_STROKE_WIDTH;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const edge of this.island.edges) {
+      // Skip coastlines and rivers (rendered separately)
+      if (edge.isCoastline || edge.isRiver) continue;
+
+      const path = this._edgeSubdivider.getSubdividedPath(
+        edge,
+        (id) => this.island.getCorner(id)
+      );
+
+      if (path.length < 2) continue;
+
+      ctx.beginPath();
+      const [x0, y0] = this.worldToScreen(path[0]);
+      ctx.moveTo(x0, y0);
+
+      for (let i = 1; i < path.length; i++) {
+        const [x, y] = this.worldToScreen(path[i]);
+        ctx.lineTo(x, y);
+      }
+
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Render rivers along subdivided edge paths
+   */
+  _renderSubdividedRivers() {
+    const ctx = this.ctx;
+
+    if (!this.island.getRiverEdges) return;
+    const rivers = this.island.getRiverEdges();
+    if (!rivers || rivers.length === 0) return;
+
+    ctx.strokeStyle = COLORS.RIVER;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    // Sort by flow (draw smaller rivers first, larger on top)
+    const sorted = [...rivers].sort((a, b) => (a.riverFlow || 0) - (b.riverFlow || 0));
+
+    for (const edge of sorted) {
+      const path = this._edgeSubdivider.getSubdividedPath(
+        edge,
+        (id) => this.island.getCorner(id)
+      );
+
+      if (path.length < 2) continue;
+
+      // Width based on flow
+      const flow = edge.riverFlow || 0;
+      const width = Math.min(RIVER_WIDTH_BASE + flow * RIVER_WIDTH_SCALE, RIVER_MAX_WIDTH);
+      ctx.lineWidth = width;
+
+      ctx.beginPath();
+      const [x0, y0] = this.worldToScreen(path[0]);
+      ctx.moveTo(x0, y0);
+
+      for (let i = 1; i < path.length; i++) {
+        const [x, y] = this.worldToScreen(path[i]);
+        ctx.lineTo(x, y);
+      }
+
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Render coastlines with bold subdivided paths
+   */
+  _renderSubdividedCoastlines() {
+    const ctx = this.ctx;
+    const coastlines = this.island.getCoastlineEdges();
+
+    ctx.strokeStyle = COLORS.COASTLINE;
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    for (const edge of coastlines) {
+      const path = this._edgeSubdivider.getSubdividedPath(
+        edge,
+        (id) => this.island.getCorner(id)
+      );
+
+      if (path.length < 2) continue;
+
+      ctx.beginPath();
+      const [x0, y0] = this.worldToScreen(path[0]);
+      ctx.moveTo(x0, y0);
+
+      for (let i = 1; i < path.length; i++) {
+        const [x, y] = this.worldToScreen(path[i]);
+        ctx.lineTo(x, y);
+      }
+
+      ctx.stroke();
+    }
   }
 
   /**
@@ -288,6 +636,10 @@ export class StrategicMapRenderer {
    * Clean up resources
    */
   dispose() {
+    this._edgeSubdivider = null;
+    this._hillshadeCalculator = null;
+    this._edgeLookup = null;
+    this._terrainInitialized = false;
     this.ctx = null;
     this.canvas = null;
     this.island = null;
